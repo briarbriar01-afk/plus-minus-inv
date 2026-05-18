@@ -138,6 +138,8 @@ export default function HomePage() {
   // ── Success screen ────────────────────────────────────────────────────────
   const [lastFormNumber, setLastFormNumber] = useState<string | null>(null);
   const [lastFormId, setLastFormId] = useState<string | null>(null);
+  const [autoPrint, setAutoPrint] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   // ── Forms list ────────────────────────────────────────────────────────────
   const [forms, setForms] = useState<FormSummary[]>([]);
@@ -177,6 +179,15 @@ export default function HomePage() {
     if (activePage === 'myForms' || activePage === 'kanban') fetchForms();
     if (activePage === 'items') fetchAllItems();
   }, [user, activePage]);
+
+  // Auto-print once form detail is loaded and ready
+  useEffect(() => {
+    if (autoPrint && selectedForm && activePage === 'formDetail') {
+      setAutoPrint(false);
+      const t = setTimeout(() => window.print(), 350);
+      return () => clearTimeout(t);
+    }
+  }, [autoPrint, selectedForm, activePage]);
 
   // ── Auth actions ──────────────────────────────────────────────────────────
   const handleAuth = async () => {
@@ -222,12 +233,14 @@ export default function HomePage() {
   };
 
   // ── Open A4 detail view ───────────────────────────────────────────────────
-  const openFormDetail = async (formId: string, from: PageView = 'myForms') => {
+  const openFormDetail = async (formId: string, from: PageView = 'myForms', print = false) => {
+    setDetailLoading(true);
     const [formRes, plusRes, minusRes] = await Promise.all([
       supabase.from('inventory_forms').select('*').eq('id', formId).single(),
       supabase.from('plus_items').select('*').eq('form_id', formId).order('created_at'),
       supabase.from('minus_items').select('*').eq('form_id', formId).order('created_at'),
     ]);
+    setDetailLoading(false);
     if (formRes.data) {
       setSelectedForm({
         ...formRes.data,
@@ -235,6 +248,7 @@ export default function HomePage() {
         minusItems: minusRes.data ?? [],
       });
       setPrevPage(from);
+      if (print) setAutoPrint(true);
       setActivePage('formDetail');
     }
   };
@@ -719,11 +733,20 @@ export default function HomePage() {
                 نوێکردنەوە
               </button>
             </div>
+            {detailLoading && (
+              <div className="mb-4 flex items-center gap-2 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-700">
+                <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+                </svg>
+                چاوەڕوانبکە، فۆرمەکە بارەکەیدەکرێت...
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="min-w-full border-separate border-spacing-0 text-right text-sm">
                 <thead>
                   <tr>
-                    {['ژمارەی فۆرم', 'ئۆرگان', 'پێشکەشکار', 'ئاست', 'بەروار', 'کردار'].map(h => (
+                    {['کردار', 'ژمارەی فۆرم', 'ئۆرگان', 'پێشکەشکار', 'ئاست', 'بەروار'].map(h => (
                       <th key={h} className="border border-slate-200 bg-slate-50 px-4 py-3 font-semibold text-slate-600 whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -737,6 +760,36 @@ export default function HomePage() {
                     </tr>
                   ) : forms.map(form => (
                     <tr key={form.id} className="odd:bg-white even:bg-slate-50 hover:bg-sky-50 transition-colors">
+                      {/* ── Action buttons — first column ── */}
+                      <td className="border border-slate-200 px-3 py-2.5 text-center whitespace-nowrap">
+                        <div className="inline-flex gap-2">
+                          {/* 👁 View */}
+                          <button
+                            onClick={() => openFormDetail(form.id, 'myForms', false)}
+                            disabled={detailLoading}
+                            title="بینینی فۆرم"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-700 disabled:opacity-50 transition"
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                            </svg>
+                            بینین
+                          </button>
+                          {/* 🖨 Print */}
+                          <button
+                            onClick={() => openFormDetail(form.id, 'myForms', true)}
+                            disabled={detailLoading}
+                            title="چاپکردنی فۆرم"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-slate-700 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-900 disabled:opacity-50 transition"
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                            </svg>
+                            چاپ
+                          </button>
+                        </div>
+                      </td>
                       <td className="border border-slate-200 px-4 py-3 font-mono font-bold text-sky-700">
                         {form.form_number ?? '—'}
                       </td>
@@ -747,12 +800,6 @@ export default function HomePage() {
                       </td>
                       <td className="border border-slate-200 px-4 py-3 text-slate-500 text-xs whitespace-nowrap">
                         {formatDate(form.created_at)}
-                      </td>
-                      <td className="border border-slate-200 px-4 py-3 text-center">
-                        <button onClick={() => openFormDetail(form.id, 'myForms')}
-                          className="rounded-xl bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-700">
-                          بینین
-                        </button>
                       </td>
                     </tr>
                   ))}
