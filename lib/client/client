@@ -1,0 +1,31 @@
+import { createClient } from '@supabase/supabase-js'; // یان @supabase/supabase-js بەپێی جۆری کتێبخانەکەت
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
+// دروستکردنی کڕایەنتی ناسراو بۆ پەیوەندی بەستن بە بنکەی دراوەکەوە
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// نموونەی پاشەکەوتکردنی داتا لە فۆرمی زیادە (Plus Items)
+export const savePlusItem = async (formData) => {
+  const { data, error } = await supabase
+    .from('plus_items')
+    .insert([
+      {
+        organ_name: formData.organName,      // ناوی ئۆرگان
+        item_type: formData.itemType,        // جۆری کەل و پەل
+        item_name: formData.itemName,        // ناوی کەل و پەل
+        item_quantity: formData.quantity,    // ژمارە
+        notes: formData.notes,               // تێبینی
+        image_url: formData.imageUrl,        // بەستەری وێنە لە Storage
+      },
+    ]);
+
+  if (error) {
+    console.error('هەڵە هەیە لە پاشەکەوتکردن:', error.message);
+    return { success: false, error };
+  }
+
+  alert('زانیارییەکان بە سەرکەوتوویی پاشەکەوت کران!');
+  return { success: true, data };
+};
