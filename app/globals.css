@@ -43,33 +43,84 @@ th {
   background: #f8fafc;
 }
 
+/* ── A4 document container ───────────────────────────────────────────────── */
+.a4-container {
+  width: 210mm;
+  min-height: 297mm;
+  font-size: 11pt;
+  line-height: 1.5;
+}
+
+/* ── Print styles ────────────────────────────────────────────────────────── */
 @media print {
-  body {
-    background: white;
-    color: #0f172a;
+  @page {
+    size: A4 portrait;
+    margin: 15mm;
   }
 
   html,
   body {
-    width: 100%;
-    height: 100%;
+    width: 210mm;
+    background: white !important;
+    color: #000 !important;
     padding: 0;
     margin: 0;
   }
 
-  body > div {
-    box-shadow: none !important;
+  /* Hide everything except the A4 document */
+  body > * {
+    display: none !important;
   }
 
-  button,
-  input,
-  textarea,
-  select {
-    box-shadow: none !important;
+  /* Show the print root wrapper */
+  body > div {
+    display: block !important;
   }
 
   .no-print,
   .print-hidden {
     display: none !important;
+  }
+
+  .a4-container {
+    width: 100% !important;
+    min-height: auto !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    font-size: 11pt;
+  }
+
+  /* Tables must not break across pages */
+  table {
+    page-break-inside: avoid;
+  }
+
+  tr {
+    page-break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
+  }
+
+  /* Preserve background colours in print */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Headers in print */
+  h1 { font-size: 16pt !important; }
+  h2 { font-size: 13pt !important; }
+  h3 { font-size: 12pt !important; }
+
+  body > div > div > *:not(.print-area) {
+    display: none !important;
+  }
+
+  .print-area {
+    display: block !important;
   }
 }

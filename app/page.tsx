@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabaseClient';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type ItemCategory = 'plus' | 'minus';
 
@@ -17,17 +19,44 @@ type ItemRow = {
   imageUrl: string;
 };
 
-type AuthMessage = {
-  type: 'success' | 'error';
-  text: string;
-} | null;
+type Msg = { type: 'success' | 'error'; text: string } | null;
 
-type InventoryForm = {
+type PageView = 'form' | 'success' | 'myForms' | 'formDetail' | 'kanban' | 'items';
+
+type FormSummary = {
   id: string;
+  form_number: string | null;
   organization: string;
   created_by_email: string | null;
   status: string;
   created_at: string;
+};
+
+type PlusItem = {
+  id: string;
+  form_id: string;
+  item_type: string;
+  item_name: string;
+  quantity: number;
+  notes: string | null;
+  created_at: string;
+};
+
+type MinusItem = {
+  id: string;
+  form_id: string;
+  item_type: string;
+  item_name: string;
+  quantity: number;
+  system_code: string;
+  notes: string | null;
+  created_at: string;
+};
+
+type FormDetail = FormSummary & {
+  message_to_admin: string | null;
+  plusItems: PlusItem[];
+  minusItems: MinusItem[];
 };
 
 type AllItem = {
@@ -42,14 +71,18 @@ type AllItem = {
   created_at: string;
 };
 
-const superAdminEmail = process.env.NEXT_PUBLIC_SUPABASE_SUPERADMIN_EMAIL ?? '';
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-const statusColumns = [
-  { key: 'new', label: 'نوێ' },
-  { key: 'sent', label: 'ناردراو' },
-  { key: 'reviewed', label: 'هەڵسەنگاندن' },
-  { key: 'completed', label: 'تەواو' },
-];
+const STATUS: Record<string, { label: string; bg: string; text: string }> = {
+  new:      { label: 'نوێ',           bg: 'bg-sky-100',     text: 'text-sky-800' },
+  sent:     { label: 'ناردراو',       bg: 'bg-amber-100',   text: 'text-amber-800' },
+  reviewed: { label: 'هەڵسەنگاندراو', bg: 'bg-violet-100',  text: 'text-violet-800' },
+  approved: { label: 'پەسەندکراو',    bg: 'bg-emerald-100', text: 'text-emerald-800' },
+};
+
+const STATUS_FLOW = ['new', 'sent', 'reviewed', 'approved'];
+
+const superAdminEmail = process.env.NEXT_PUBLIC_SUPABASE_SUPERADMIN_EMAIL ?? '';
 
 const defaultRow = (category: ItemCategory): ItemRow => ({
   id: `${category}-${Math.random().toString(36).slice(2)}-${Date.now()}`,
@@ -63,537 +96,355 @@ const defaultRow = (category: ItemCategory): ItemRow => ({
   imageUrl: '',
 });
 
-const initialForm = {
-  organization: '',
-  rows: [defaultRow('plus')],
-  messageToAdmin: '',
-};
+const blankForm = { organization: '', rows: [defaultRow('plus')], messageToAdmin: '' };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status: string }) {
+  const s = STATUS[status] ?? { label: status, bg: 'bg-slate-100', text: 'text-slate-700' };
+  return (
+    <span className={`inline-block rounded-full px-3 py-1 text-xs font-semibold ${s.bg} ${s.text}`}>
+      {s.label}
+    </span>
+  );
+}
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString('ar-IQ', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  });
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function HomePage() {
+  // ── Auth ──────────────────────────────────────────────────────────────────
   const [user, setUser] = useState<any>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [authMessage, setAuthMessage] = useState<AuthMessage>(null);
-  const [formState, setFormState] = useState(initialForm as typeof initialForm);
-  const [statusMessage, setStatusMessage] = useState<AuthMessage>(null);
-  const [isSaving, setIsSaving] = useState(false);
-  const [forms, setForms] = useState<InventoryForm[]>([]);
-  const [activePage, setActivePage] = useState<'form' | 'myForms' | 'kanban' | 'items'>('form');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authMsg, setAuthMsg] = useState<Msg>(null);
 
-  // Add-Delete page state
+  // ── Navigation ────────────────────────────────────────────────────────────
+  const [activePage, setActivePage] = useState<PageView>('form');
+  const [prevPage, setPrevPage] = useState<PageView>('myForms');
+
+  // ── Form creation ─────────────────────────────────────────────────────────
+  const [formState, setFormState] = useState(blankForm);
+  const [submitMsg, setSubmitMsg] = useState<Msg>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  // ── Success screen ────────────────────────────────────────────────────────
+  const [lastFormNumber, setLastFormNumber] = useState<string | null>(null);
+  const [lastFormId, setLastFormId] = useState<string | null>(null);
+
+  // ── Forms list ────────────────────────────────────────────────────────────
+  const [forms, setForms] = useState<FormSummary[]>([]);
+
+  // ── Form detail (A4 view) ─────────────────────────────────────────────────
+  const [selectedForm, setSelectedForm] = useState<FormDetail | null>(null);
+
+  // ── Admin: direct items ───────────────────────────────────────────────────
   const [allItems, setAllItems] = useState<AllItem[]>([]);
-  const [addItemCategory, setAddItemCategory] = useState<ItemCategory>('plus');
-  const [addItemType, setAddItemType] = useState('');
-  const [addItemName, setAddItemName] = useState('');
-  const [addItemQuantity, setAddItemQuantity] = useState('');
-  const [addItemSystemCode, setAddItemSystemCode] = useState('');
-  const [addItemNotes, setAddItemNotes] = useState('');
-  const [isAddingItem, setIsAddingItem] = useState(false);
-  const [itemsMessage, setItemsMessage] = useState<AuthMessage>(null);
+  const [addCat, setAddCat] = useState<ItemCategory>('plus');
+  const [addType, setAddType] = useState('');
+  const [addName, setAddName] = useState('');
+  const [addQty, setAddQty] = useState('');
+  const [addCode, setAddCode] = useState('');
+  const [addNotes, setAddNotes] = useState('');
+  const [isAdding, setIsAdding] = useState(false);
+  const [itemsMsg, setItemsMsg] = useState<Msg>(null);
 
   const isSuperAdmin =
-    Boolean(user?.email) && user?.email?.toLowerCase() === superAdminEmail.toLowerCase();
+    Boolean(user?.email) &&
+    user.email.toLowerCase() === superAdminEmail.toLowerCase();
 
+  // ── Auth init ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    const loadSession = async () => {
-      const { data } = await supabase.auth.getSession();
+    supabase.auth.getSession().then(({ data }) => {
       setUser(data.session?.user ?? null);
       setLoadingAuth(false);
-    };
-
-    loadSession();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_e, session) => {
       setUser(session?.user ?? null);
     });
-
-    return () => authListener?.subscription?.unsubscribe();
+    return () => listener?.subscription?.unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (user) {
-      fetchForms();
-    }
-  }, [user, activePage, isSuperAdmin]);
-
-  useEffect(() => {
-    if (user && activePage === 'items') {
-      fetchAllItems();
-    }
+    if (!user) return;
+    if (activePage === 'myForms' || activePage === 'kanban') fetchForms();
+    if (activePage === 'items') fetchAllItems();
   }, [user, activePage]);
 
+  // ── Auth actions ──────────────────────────────────────────────────────────
   const handleAuth = async () => {
-    setAuthMessage(null);
-
-    if (!email.trim() || !password.trim()) {
-      setAuthMessage({ type: 'error', text: 'تکایە ئیمەیڵ و تێپەڕەوشە بنووسە.' });
+    setAuthMsg(null);
+    if (!authEmail.trim() || !authPassword.trim()) {
+      setAuthMsg({ type: 'error', text: 'تکایە ئیمەیڵ و تێپەڕەوشە بنووسە.' });
       return;
     }
-
     if (authMode === 'login') {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        setAuthMessage({ type: 'error', text: error.message });
-        return;
-      }
-      setAuthMessage({ type: 'success', text: 'چوونە ژوورەوە سەرکەوتوو بوو.' });
+      const { error } = await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword });
+      if (error) { setAuthMsg({ type: 'error', text: error.message }); return; }
     } else {
-      const { error } = await supabase.auth.signUp({ email, password });
-      if (error) {
-        setAuthMessage({ type: 'error', text: error.message });
-        return;
-      }
-      setAuthMessage({
-        type: 'success',
-        text: 'تکایە پەیامی ئیمەیڵەکەت بگورە بۆ چالاککردنی ئەکاونت.',
-      });
+      const { error } = await supabase.auth.signUp({ email: authEmail, password: authPassword });
+      if (error) { setAuthMsg({ type: 'error', text: error.message }); return; }
+      setAuthMsg({ type: 'success', text: 'تکایە پەیامی ئیمەیڵەکەت بگورە بۆ چالاककردنی ئەکاونت.' });
     }
   };
 
   const signOut = async () => {
     await supabase.auth.signOut();
     setUser(null);
-    setFormState(initialForm as typeof initialForm);
+    setFormState(blankForm);
     setForms([]);
     setActivePage('form');
   };
 
+  // ── Navigate helper ───────────────────────────────────────────────────────
+  const goTo = (page: PageView) => {
+    setPrevPage(activePage);
+    setActivePage(page);
+  };
+
+  // ── Fetch forms list ──────────────────────────────────────────────────────
   const fetchForms = async () => {
     if (!user) return;
-
-    let query = supabase
+    let q = supabase
       .from('inventory_forms')
-      .select('id,organization,created_by_email,status,created_at')
+      .select('id, form_number, organization, created_by_email, status, created_at')
       .order('created_at', { ascending: false });
-
-    if (!isSuperAdmin) {
-      query = query.eq('created_by', user.id);
-    }
-
-    const { data, error } = await query;
-    if (error) {
-      console.error(error.message);
-      return;
-    }
-
+    if (!isSuperAdmin) q = q.eq('created_by', user.id);
+    const { data } = await q;
     setForms(data ?? []);
   };
 
-  const fetchAllItems = async () => {
-    const [plusResult, minusResult] = await Promise.all([
-      supabase
-        .from('plus_items')
-        .select('id, form_id, item_type, item_name, quantity, notes, created_at')
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('minus_items')
-        .select('id, form_id, item_type, item_name, quantity, notes, system_code, created_at')
-        .order('created_at', { ascending: false }),
+  // ── Open A4 detail view ───────────────────────────────────────────────────
+  const openFormDetail = async (formId: string, from: PageView = 'myForms') => {
+    const [formRes, plusRes, minusRes] = await Promise.all([
+      supabase.from('inventory_forms').select('*').eq('id', formId).single(),
+      supabase.from('plus_items').select('*').eq('form_id', formId).order('created_at'),
+      supabase.from('minus_items').select('*').eq('form_id', formId).order('created_at'),
     ]);
+    if (formRes.data) {
+      setSelectedForm({
+        ...formRes.data,
+        plusItems: plusRes.data ?? [],
+        minusItems: minusRes.data ?? [],
+      });
+      setPrevPage(from);
+      setActivePage('formDetail');
+    }
+  };
 
-    const plusItems: AllItem[] = (plusResult.data ?? []).map((item) => ({
-      ...item,
-      category: 'plus' as const,
-    }));
-    const minusItems: AllItem[] = (minusResult.data ?? []).map((item) => ({
-      ...item,
-      category: 'minus' as const,
-    }));
-
-    const combined = [...plusItems, ...minusItems].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    );
+  // ── Fetch all items (admin) ───────────────────────────────────────────────
+  const fetchAllItems = async () => {
+    const [plusRes, minusRes] = await Promise.all([
+      supabase.from('plus_items').select('*').order('created_at', { ascending: false }),
+      supabase.from('minus_items').select('*').order('created_at', { ascending: false }),
+    ]);
+    const combined: AllItem[] = [
+      ...(plusRes.data ?? []).map((i: any) => ({ ...i, category: 'plus' as const })),
+      ...(minusRes.data ?? []).map((i: any) => ({ ...i, category: 'minus' as const })),
+    ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     setAllItems(combined);
   };
 
-  const handleAddDirectItem = async () => {
-    if (!addItemType.trim() || !addItemName.trim()) {
-      setItemsMessage({ type: 'error', text: 'تکایە جۆر و ناوی کەل و پەل بنووسە.' });
-      return;
+  // ── Form row helpers ──────────────────────────────────────────────────────
+  const addRow = (cat: ItemCategory) =>
+    setFormState(p => ({ ...p, rows: [...p.rows, defaultRow(cat)] }));
+
+  const updateRow = (id: string, changes: Partial<ItemRow>) =>
+    setFormState(p => ({ ...p, rows: p.rows.map(r => r.id === id ? { ...r, ...changes } : r) }));
+
+  const removeRow = (id: string) =>
+    setFormState(p => ({ ...p, rows: p.rows.filter(r => r.id !== id) }));
+
+  // ── Validate ──────────────────────────────────────────────────────────────
+  const validate = (): string | null => {
+    if (!formState.organization.trim()) return 'تکایە ناوی ئۆرگان بنووسە.';
+    if (formState.rows.length === 0) return 'تکایە یەک ریزە زیاد بکە.';
+    for (const r of formState.rows) {
+      if (!r.itemType.trim()) return 'تکایە جۆری کەل و پەل دیاری بکە.';
+      if (!r.itemName.trim()) return 'تکایە ناوی کەل و پەل بنووسە.';
+      const q = Number(r.quantity);
+      if (!r.quantity || isNaN(q) || q <= 0) return 'ژمارە دەبێت ژمارەیەکی دروست بێت.';
+      if (r.category === 'minus' && !r.systemCode.trim()) return 'تکایە کۆدی سیستەم بۆ کەمبوو بنووسە.';
     }
-    const qty = Number(addItemQuantity);
-    if (!addItemQuantity || isNaN(qty) || qty <= 0) {
-      setItemsMessage({ type: 'error', text: 'ژمارەی کەل و پەل دەبێت ژمارەیەکی دروست بێت.' });
-      return;
-    }
-    if (addItemCategory === 'minus' && !addItemSystemCode.trim()) {
-      setItemsMessage({ type: 'error', text: 'تکایە کۆدی سیستەم بۆ کەمبوو بنووسە.' });
-      return;
-    }
-
-    setIsAddingItem(true);
-    setItemsMessage(null);
-
-    try {
-      const { data: formRecord, error: formError } = await supabase
-        .from('inventory_forms')
-        .insert([{
-          organization: 'ڕاستەوخۆ',
-          created_by: user.id,
-          created_by_email: user.email,
-          status: 'completed',
-          message_to_admin: null,
-        }])
-        .select('id')
-        .single();
-
-      if (formError || !formRecord) throw formError ?? new Error('هەڵەیەک ڕوویدا');
-
-      if (addItemCategory === 'plus') {
-        const { error } = await supabase.from('plus_items').insert([{
-          form_id: formRecord.id,
-          item_type: addItemType,
-          item_name: addItemName,
-          quantity: qty,
-          notes: addItemNotes || null,
-          image_path: null,
-        }]);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('minus_items').insert([{
-          form_id: formRecord.id,
-          item_type: addItemType,
-          item_name: addItemName,
-          quantity: qty,
-          system_code: addItemSystemCode,
-          notes: addItemNotes || null,
-        }]);
-        if (error) throw error;
-      }
-
-      setItemsMessage({ type: 'success', text: 'کەل و پەل بە سەرکەوتوویی زیادکرا.' });
-      setAddItemType('');
-      setAddItemName('');
-      setAddItemQuantity('');
-      setAddItemSystemCode('');
-      setAddItemNotes('');
-      fetchAllItems();
-    } catch (err) {
-      setItemsMessage({ type: 'error', text: `هەڵەیەک ڕوویدا: ${(err as Error).message}` });
-    } finally {
-      setIsAddingItem(false);
-    }
-  };
-
-  const handleDeleteItem = async (id: string, category: ItemCategory) => {
-    const table = category === 'plus' ? 'plus_items' : 'minus_items';
-    const { error } = await supabase.from(table).delete().eq('id', id);
-    if (error) {
-      setItemsMessage({ type: 'error', text: `هەڵەیەک ڕوویدا: ${error.message}` });
-      return;
-    }
-    setItemsMessage({ type: 'success', text: 'کەل و پەل سڕایەوە.' });
-    fetchAllItems();
-  };
-
-  const validateForm = () => {
-    if (!formState.organization.trim()) {
-      return 'تکایە ناوی ئۆرگان بنووسە.';
-    }
-
-    if (formState.rows.length === 0) {
-      return 'تکایە یەک ریزە زیاد بکە.';
-    }
-
-    for (const row of formState.rows) {
-      if (!row.itemType.trim()) {
-        return 'تکایە جۆری کەل و پەل دیاری بکە.';
-      }
-      if (!row.itemName.trim()) {
-        return 'تکایە ناوی کەل و پەل بنووسە.';
-      }
-      const quantity = Number(row.quantity);
-      if (!row.quantity || Number.isNaN(quantity) || quantity <= 0) {
-        return 'ژمارەی کەل و پەل دەبێت ژمارەیەکی دروست بێت.';
-      }
-      if (row.category === 'minus' && !row.systemCode.trim()) {
-        return 'تکایە کۆدی سیستەم بۆ کەمبوو بنووسە.';
-      }
-    }
-
     return null;
   };
 
-  const uploadImage = async (file: File) => {
-    const filePath = `inventory_images/${Date.now()}-${file.name}`;
+  // ── Upload image ──────────────────────────────────────────────────────────
+  const uploadImage = async (file: File): Promise<string> => {
+    const path = `inventory_images/${Date.now()}-${file.name}`;
     const { data, error } = await supabase.storage
       .from('inventory_images')
-      .upload(filePath, file, { cacheControl: '3600', upsert: false });
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
+      .upload(path, file, { cacheControl: '3600', upsert: false });
+    if (error) throw new Error(error.message);
     return data.path;
   };
 
-  const persistForm = async (status: string) => {
-    if (!user) {
-      setStatusMessage({ type: 'error', text: 'تکایە بچوونە ژوورەوە بۆ پاشەکەوتکردن.' });
-      return null;
-    }
+  // ── Core submit ───────────────────────────────────────────────────────────
+  const submitForm = async (status: 'new' | 'sent') => {
+    const err = validate();
+    if (err) { setSubmitMsg({ type: 'error', text: err }); return; }
 
-    const { data: formRecord, error: formError } = await supabase
-      .from('inventory_forms')
-      .insert([
-        {
+    setIsSaving(true);
+    setSubmitMsg(null);
+
+    try {
+      // 1. Insert form row — trigger auto-sets form_number
+      const { data: formRecord, error: formErr } = await supabase
+        .from('inventory_forms')
+        .insert([{
           organization: formState.organization,
           created_by: user.id,
           created_by_email: user.email,
           status,
-          message_to_admin: formState.messageToAdmin,
-        },
-      ])
-      .select('id')
-      .single();
+          message_to_admin: formState.messageToAdmin || null,
+        }])
+        .select('id, form_number')
+        .single();
 
-    if (formError || !formRecord) {
-      throw formError ?? new Error('تۆمارکردنی فۆرم سەرکەوتنەبوو');
-    }
+      if (formErr || !formRecord) throw formErr ?? new Error('تۆمارکردنی فۆرم سەرکەوتنەبوو');
 
-    return formRecord.id;
-  };
-
-  const handleSave = async () => {
-    const errorMessage = validateForm();
-    if (errorMessage) {
-      setStatusMessage({ type: 'error', text: errorMessage });
-      return;
-    }
-
-    setIsSaving(true);
-    setStatusMessage(null);
-
-    try {
-      const formId = await persistForm('new');
-      if (!formId) return;
-
-      const plusRows = formState.rows.filter((row) => row.category === 'plus');
-      const minusRows = formState.rows.filter((row) => row.category === 'minus');
-
+      // 2. Insert plus items
+      const plusRows = formState.rows.filter(r => r.category === 'plus');
       if (plusRows.length > 0) {
-        const payload = await Promise.all(
-          plusRows.map(async (row) => {
-            const imagePath = row.image ? await uploadImage(row.image) : null;
-            return {
-              form_id: formId,
-              item_type: row.itemType,
-              item_name: row.itemName,
-              quantity: Number(row.quantity),
-              notes: row.notes,
-              image_path: imagePath,
-            };
-          })
-        );
-
-        const { error: plusError } = await supabase.from('plus_items').insert(payload);
-        if (plusError) throw plusError;
+        const payload = await Promise.all(plusRows.map(async r => ({
+          form_id: formRecord.id,
+          item_type: r.itemType,
+          item_name: r.itemName,
+          quantity: Number(r.quantity),
+          notes: r.notes || null,
+          image_path: r.image ? await uploadImage(r.image) : null,
+        })));
+        const { error } = await supabase.from('plus_items').insert(payload);
+        if (error) throw error;
       }
 
+      // 3. Insert minus items
+      const minusRows = formState.rows.filter(r => r.category === 'minus');
       if (minusRows.length > 0) {
-        const payload = minusRows.map((row) => ({
-          form_id: formId,
-          item_type: row.itemType,
-          item_name: row.itemName,
-          quantity: Number(row.quantity),
-          system_code: row.systemCode,
-          notes: row.notes,
+        const payload = minusRows.map(r => ({
+          form_id: formRecord.id,
+          item_type: r.itemType,
+          item_name: r.itemName,
+          quantity: Number(r.quantity),
+          system_code: r.systemCode,
+          notes: r.notes || null,
         }));
-
-        const { error: minusError } = await supabase.from('minus_items').insert(payload);
-        if (minusError) throw minusError;
+        const { error } = await supabase.from('minus_items').insert(payload);
+        if (error) throw error;
       }
 
-      setStatusMessage({ type: 'success', text: 'فۆرم بە سەرکەوتوویی پاشەکەوت کرا.' });
-      setFormState(initialForm as typeof initialForm);
-      fetchForms();
-    } catch (error) {
-      setStatusMessage({ type: 'error', text: `هەڵەیەک ڕوویدا: ${(error as Error).message}` });
+      setLastFormNumber(formRecord.form_number);
+      setLastFormId(formRecord.id);
+      setFormState(blankForm);
+      setActivePage('success');
+    } catch (e) {
+      setSubmitMsg({ type: 'error', text: `هەڵەیەک ڕوویدا: ${(e as Error).message}` });
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleSend = async () => {
-    const errorMessage = validateForm();
-    if (errorMessage) {
-      setStatusMessage({ type: 'error', text: errorMessage });
-      return;
+  // ── Change form status ────────────────────────────────────────────────────
+  const changeStatus = async (formId: string, next: string) => {
+    await supabase.from('inventory_forms').update({ status: next }).eq('id', formId);
+    setSelectedForm(p => p?.id === formId ? { ...p, status: next } : p);
+    setForms(prev => prev.map(f => f.id === formId ? { ...f, status: next } : f));
+  };
+
+  // ── Admin: add direct item ────────────────────────────────────────────────
+  const handleAddItem = async () => {
+    if (!addType.trim() || !addName.trim()) {
+      setItemsMsg({ type: 'error', text: 'تکایە جۆر و ناوی کەل و پەل بنووسە.' }); return;
     }
-
-    setIsSaving(true);
-    setStatusMessage(null);
-
+    const qty = Number(addQty);
+    if (!addQty || isNaN(qty) || qty <= 0) {
+      setItemsMsg({ type: 'error', text: 'ژمارە دەبێت ژمارەیەکی دروست بێت.' }); return;
+    }
+    if (addCat === 'minus' && !addCode.trim()) {
+      setItemsMsg({ type: 'error', text: 'تکایە کۆدی سیستەم بنووسە.' }); return;
+    }
+    setIsAdding(true);
+    setItemsMsg(null);
     try {
-      const formId = await persistForm('sent');
-      if (!formId) return;
-
-      const plusRows = formState.rows.filter((row) => row.category === 'plus');
-      const minusRows = formState.rows.filter((row) => row.category === 'minus');
-
-      if (plusRows.length > 0) {
-        const payload = await Promise.all(
-          plusRows.map(async (row) => {
-            const imagePath = row.image ? await uploadImage(row.image) : null;
-            return {
-              form_id: formId,
-              item_type: row.itemType,
-              item_name: row.itemName,
-              quantity: Number(row.quantity),
-              notes: row.notes,
-              image_path: imagePath,
-            };
-          })
-        );
-
-        const { error: plusError } = await supabase.from('plus_items').insert(payload);
-        if (plusError) throw plusError;
+      const { data: formRec, error: formErr } = await supabase
+        .from('inventory_forms')
+        .insert([{ organization: 'ڕاستەوخۆ', created_by: user.id, created_by_email: user.email, status: 'approved', message_to_admin: null }])
+        .select('id').single();
+      if (formErr || !formRec) throw formErr ?? new Error('هەڵە');
+      if (addCat === 'plus') {
+        await supabase.from('plus_items').insert([{ form_id: formRec.id, item_type: addType, item_name: addName, quantity: qty, notes: addNotes || null, image_path: null }]);
+      } else {
+        await supabase.from('minus_items').insert([{ form_id: formRec.id, item_type: addType, item_name: addName, quantity: qty, system_code: addCode, notes: addNotes || null }]);
       }
-
-      if (minusRows.length > 0) {
-        const payload = minusRows.map((row) => ({
-          form_id: formId,
-          item_type: row.itemType,
-          item_name: row.itemName,
-          quantity: Number(row.quantity),
-          system_code: row.systemCode,
-          notes: row.notes,
-        }));
-
-        const { error: minusError } = await supabase.from('minus_items').insert(payload);
-        if (minusError) throw minusError;
-      }
-
-      setStatusMessage({ type: 'success', text: 'فۆرم بەسەرکەوتوویی بۆ سوپەرئەدمین ناردرا.' });
-      setFormState(initialForm as typeof initialForm);
-      fetchForms();
-    } catch (error) {
-      setStatusMessage({ type: 'error', text: `هەڵەیەک ڕوویدا: ${(error as Error).message}` });
+      setItemsMsg({ type: 'success', text: 'کەل و پەل بە سەرکەوتوویی زیادکرا.' });
+      setAddType(''); setAddName(''); setAddQty(''); setAddCode(''); setAddNotes('');
+      fetchAllItems();
+    } catch (e) {
+      setItemsMsg({ type: 'error', text: `هەڵەیەک ڕوویدا: ${(e as Error).message}` });
     } finally {
-      setIsSaving(false);
+      setIsAdding(false);
     }
   };
 
-  const handleClear = () => {
-    setFormState(initialForm as typeof initialForm);
-    setStatusMessage(null);
+  const handleDeleteItem = async (id: string, cat: ItemCategory) => {
+    await supabase.from(cat === 'plus' ? 'plus_items' : 'minus_items').delete().eq('id', id);
+    fetchAllItems();
   };
 
-  const handlePrint = () => {
-    window.print();
-  };
-
-  const addRow = (category: ItemCategory) => {
-    setFormState((prev) => ({
-      ...prev,
-      rows: [...prev.rows, defaultRow(category)],
-    }));
-  };
-
-  const updateRow = (id: string, changes: Partial<ItemRow>) => {
-    setFormState((prev) => ({
-      ...prev,
-      rows: prev.rows.map((row) => (row.id === id ? { ...row, ...changes } : row)),
-    }));
-  };
-
-  const removeRow = (id: string) => {
-    setFormState((prev) => ({
-      ...prev,
-      rows: prev.rows.filter((row) => row.id !== id),
-    }));
-  };
-
-  const changeFormStatus = async (formId: string, nextStatus: string) => {
-    const { error } = await supabase
-      .from('inventory_forms')
-      .update({ status: nextStatus })
-      .eq('id', formId);
-
-    if (error) {
-      console.error(error.message);
-      return;
-    }
-
-    fetchForms();
-  };
-
-  const filteredForms = (status: string) => forms.filter((form) => form.status === status);
-
-  const printPlusRows = formState.rows.filter((row) => row.category === 'plus');
-  const printMinusRows = formState.rows.filter((row) => row.category === 'minus');
-
-  const title = useMemo(
-    () => 'فۆرمی تۆمارکردنی جیاوازییەکانی جەرد',
-    []
-  );
+  // ─────────────────────────────────────────────────────────────────────────
+  // RENDER
+  // ─────────────────────────────────────────────────────────────────────────
 
   if (loadingAuth) {
     return (
-      <div className="min-h-screen bg-slate-100 flex items-center justify-center text-slate-700">
-        <div className="rounded-3xl border border-slate-300 bg-white p-8 shadow-paper">چاوەڕوانکردنی دەستپێکردن...</div>
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <div className="rounded-3xl border border-slate-200 bg-white p-8 text-slate-600 shadow-sm">
+          چاوەڕوانکردنی دەستپێکردن...
+        </div>
       </div>
     );
   }
 
+  // ── Auth screen ───────────────────────────────────────────────────────────
   if (!user) {
     return (
-      <div className="min-h-screen bg-slate-100 p-6 flex items-center justify-center">
-        <div className="w-full max-w-md rounded-[28px] border border-slate-200 bg-white p-8 shadow-paper rtl">
-          <h1 className="text-xl font-semibold text-slate-900 mb-4">چوونە ژوورەوە یان دروستکردن</h1>
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-6">
+        <div className="w-full max-w-md rounded-[28px] border border-slate-200 bg-white p-8 shadow-sm rtl">
+          <h1 className="text-xl font-bold text-slate-900 mb-6">چوونە ژوورەوە یان دروستکردن</h1>
           <div className="grid gap-4">
             <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setAuthMode('login')}
-                className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold transition ${
-                  authMode === 'login' ? 'bg-sky-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                چوونە ژوورەوە
-              </button>
-              <button
-                type="button"
-                onClick={() => setAuthMode('signup')}
-                className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold transition ${
-                  authMode === 'signup' ? 'bg-sky-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                }`}
-              >
-                دروستکردنی ئەکاونت
-              </button>
+              {(['login', 'signup'] as const).map(mode => (
+                <button key={mode} type="button" onClick={() => setAuthMode(mode)}
+                  className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold transition ${authMode === mode ? 'bg-sky-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
+                  {mode === 'login' ? 'چوونە ژوورەوە' : 'دروستکردنی ئەکاونت'}
+                </button>
+              ))}
             </div>
-            <label className="space-y-2 text-sm font-medium text-slate-700">
+            <label className="block text-sm font-medium text-slate-700">
               ئیمەیڵ
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-              />
+              <input type="email" value={authEmail} onChange={e => setAuthEmail(e.target.value)}
+                className="mt-1 w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100" />
             </label>
-            <label className="space-y-2 text-sm font-medium text-slate-700">
+            <label className="block text-sm font-medium text-slate-700">
               تێپەڕەوشە
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-              />
+              <input type="password" value={authPassword} onChange={e => setAuthPassword(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleAuth()}
+                className="mt-1 w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100" />
             </label>
-            {authMessage ? (
-              <div className={`rounded-3xl p-3 text-sm font-medium ${
-                authMessage.type === 'success' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-              }`}>
-                {authMessage.text}
+            {authMsg && (
+              <div className={`rounded-2xl p-3 text-sm ${authMsg.type === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+                {authMsg.text}
               </div>
-            ) : null}
-            <button
-              type="button"
-              onClick={handleAuth}
-              className="rounded-3xl bg-sky-600 px-5 py-3 text-white transition hover:bg-sky-700"
-            >
+            )}
+            <button type="button" onClick={handleAuth}
+              className="rounded-3xl bg-sky-600 px-5 py-3 font-semibold text-white transition hover:bg-sky-700">
               {authMode === 'login' ? 'چوونە ژوورەوە' : 'دروستکردنی ئەکاونت'}
             </button>
           </div>
@@ -602,654 +453,639 @@ export default function HomePage() {
     );
   }
 
+  // ── Main app ──────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-slate-100 p-6 print:p-0 print:bg-white">
-      <div className="mx-auto w-full max-w-[1200px] rtl">
-        <header className="mb-6 rounded-[30px] border border-slate-200 bg-white p-6 shadow-paper print:hidden">
-          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div className="min-h-screen bg-slate-100 p-4 md:p-6 print:p-0 print:bg-white rtl">
+      <div className="mx-auto w-full max-w-[1200px]">
+
+        {/* ── Header ── */}
+        <header className="no-print mb-5 rounded-[26px] border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <p className="text-sm text-slate-500">فۆرمی جیاوازییەکانی جەرد</p>
-              <h1 className="text-3xl font-semibold text-slate-900">{title}</h1>
-              <p className="mt-2 text-sm text-slate-600">ئەم وێب ئەپە بۆ کارمەند و سوپێرڤایزەرە.</p>
+              <p className="text-xs text-slate-500 mb-0.5">سیستەمی جەردی کەل و پەل</p>
+              <h1 className="text-xl font-bold text-slate-900">فۆرمی جیاوازییەکانی جەرد</h1>
             </div>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="rounded-3xl bg-slate-100 px-4 py-3 text-slate-700">
-                {user.email}
-                <div className="text-xs text-slate-500">{isSuperAdmin ? 'سوپێر ئەدمین' : 'کارمەند'}</div>
+            <div className="flex items-center gap-3">
+              <div className="rounded-2xl bg-slate-100 px-4 py-2.5 text-sm">
+                <div className="font-medium text-slate-800">{user.email}</div>
+                <div className="text-xs text-slate-500">{isSuperAdmin ? 'سوپەر ئەدمین' : 'کارمەند'}</div>
               </div>
-              <button
-                type="button"
-                onClick={signOut}
-                className="rounded-3xl bg-rose-600 px-5 py-3 text-white transition hover:bg-rose-700"
-              >
+              <button onClick={signOut}
+                className="rounded-2xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-700 transition">
                 دەرچوون
               </button>
             </div>
           </div>
         </header>
 
-        <section className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 print:hidden">
-          <button
-            type="button"
-            onClick={() => setActivePage('form')}
-            className={`rounded-3xl border px-5 py-4 text-right shadow-sm transition ${
-              activePage === 'form' ? 'border-sky-500 bg-sky-50 text-slate-900' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-            }`}
-          >
-            <h2 className="text-base font-semibold">فۆرمی تازە</h2>
-            <p className="text-sm text-slate-500">کەل و پەلی زیادە یان کەمبوو تۆمار بکە.</p>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActivePage('myForms')}
-            className={`rounded-3xl border px-5 py-4 text-right shadow-sm transition ${
-              activePage === 'myForms' ? 'border-sky-500 bg-sky-50 text-slate-900' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-            }`}
-          >
-            <h2 className="text-base font-semibold">فۆرمەکانی من</h2>
-            <p className="text-sm text-slate-500">فۆرمەکانی تۆ ببینە.</p>
-          </button>
-          {isSuperAdmin ? (
-            <button
-              type="button"
-              onClick={() => setActivePage('kanban')}
-              className={`rounded-3xl border px-5 py-4 text-right shadow-sm transition ${
-                activePage === 'kanban' ? 'border-sky-500 bg-sky-50 text-slate-900' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-              }`}
-            >
-              <h2 className="text-base font-semibold">کانبان</h2>
-              <p className="text-sm text-slate-500">هەموو فۆرمەکان ببینە.</p>
+        {/* ── Navigation ── */}
+        <nav className="no-print mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {[
+            { key: 'form',    label: 'فۆرمی تازە',                         desc: 'کەل و پەلی جیاوازی تۆمار بکە' },
+            { key: 'myForms', label: isSuperAdmin ? 'هەموو فۆرمەکان' : 'فۆرمەکانم', desc: 'فۆرمە پێشکەشکراوەکان ببینە' },
+            ...(isSuperAdmin ? [
+              { key: 'kanban', label: 'کانبان', desc: 'شوێنکەوتنی ئاست' },
+              { key: 'items',  label: 'کەل و پەلەکان', desc: 'زیادکردن و سڕینەوە' },
+            ] : []),
+          ].map(item => (
+            <button key={item.key} type="button"
+              onClick={() => goTo(item.key as PageView)}
+              className={`rounded-2xl border px-4 py-3.5 text-right transition ${
+                activePage === item.key
+                  ? 'border-sky-500 bg-sky-50 shadow-sm'
+                  : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50'
+              }`}>
+              <div className="font-semibold text-sm text-slate-900">{item.label}</div>
+              <div className="text-xs text-slate-500 mt-0.5">{item.desc}</div>
             </button>
-          ) : null}
-          {isSuperAdmin ? (
-            <button
-              type="button"
-              onClick={() => setActivePage('items')}
-              className={`rounded-3xl border px-5 py-4 text-right shadow-sm transition ${
-                activePage === 'items' ? 'border-violet-500 bg-violet-50 text-slate-900' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'
-              }`}
-            >
-              <h2 className="text-base font-semibold">زیادکردن و سڕینەوە</h2>
-              <p className="text-sm text-slate-500">ڕاستەوخۆ کەل و پەل زیاد بکە یان بیسڕەوە.</p>
-            </button>
-          ) : null}
-        </section>
+          ))}
+        </nav>
 
-        <div className="hidden print:block">
-          <div className="rounded-[20px] border border-slate-300 bg-white p-6">
-            <h2 className="text-2xl font-semibold text-slate-900">فۆرمی تۆماری کەل و پەلی جیاوازی</h2>
-            <p className="mt-4 text-lg font-medium text-slate-700">ناوی ئۆرگان: {formState.organization || '---'}</p>
-
-            <div className="mt-6">
-              <h3 className="mb-3 text-lg font-semibold text-slate-900">کەل و پەلی زیادە</h3>
-              <table className="min-w-full border-separate border-spacing-0 text-right">
-                <thead>
-                  <tr className="bg-slate-100 text-slate-600">
-                    <th className="border border-slate-300 p-3">جۆری کەل و پەل</th>
-                    <th className="border border-slate-300 p-3">ناوی کەل و پەل</th>
-                    <th className="border border-slate-300 p-3">ژمارە</th>
-                    <th className="border border-slate-300 p-3">وێنە</th>
-                    <th className="border border-slate-300 p-3">تێبینی</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {printPlusRows.map((row) => (
-                    <tr key={row.id} className="even:bg-white odd:bg-slate-50">
-                      <td className="border border-slate-300 p-2">{row.itemType}</td>
-                      <td className="border border-slate-300 p-2">{row.itemName}</td>
-                      <td className="border border-slate-300 p-2">{row.quantity}</td>
-                      <td className="border border-slate-300 p-2">
-                        {row.imageUrl ? (
-                          <img src={row.imageUrl} alt="Preview" className="mx-auto h-24 w-auto object-contain" />
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td className="border border-slate-300 p-2">{row.notes}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="mt-6">
-              <h3 className="mb-3 text-lg font-semibold text-slate-900">کەل و پەلی کەمبوو</h3>
-              <table className="min-w-full border-separate border-spacing-0 text-right">
-                <thead>
-                  <tr className="bg-slate-100 text-slate-600">
-                    <th className="border border-slate-300 p-3">جۆری کەل و پەل</th>
-                    <th className="border border-slate-300 p-3">ناوی کەل و پەل</th>
-                    <th className="border border-slate-300 p-3">ژمارە</th>
-                    <th className="border border-slate-300 p-3">کۆدی سیستەم</th>
-                    <th className="border border-slate-300 p-3">تێبینی</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {printMinusRows.map((row) => (
-                    <tr key={row.id} className="even:bg-white odd:bg-slate-50">
-                      <td className="border border-slate-300 p-2">{row.itemType}</td>
-                      <td className="border border-slate-300 p-2">{row.itemName}</td>
-                      <td className="border border-slate-300 p-2">{row.quantity}</td>
-                      <td className="border border-slate-300 p-2">{row.systemCode}</td>
-                      <td className="border border-slate-300 p-2">{row.notes}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        {activePage === 'form' ? (
-          <div className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-paper print:hidden">
-            <div className="mb-6 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
-              <div>
-                <p className="text-sm text-slate-500">سەروویی فۆرم</p>
-                <h2 className="text-2xl font-semibold text-slate-900">فۆرمی تۆمارکردنی کەل و پەلی جیاوازی</h2>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  onClick={() => addRow('plus')}
-                  className="rounded-3xl bg-emerald-600 px-5 py-3 text-white transition hover:bg-emerald-700"
-                >
-                  زیادکردنی ڕیزەی (+)
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {/* VIEW: Form creation                                              */}
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {activePage === 'form' && (
+          <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-lg font-bold text-slate-900">فۆرمی تازەی جیاوازی جەرد</h2>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => addRow('plus')}
+                  className="rounded-2xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700">
+                  + زیادە
                 </button>
-                <button
-                  type="button"
-                  onClick={() => addRow('minus')}
-                  className="rounded-3xl bg-rose-600 px-5 py-3 text-white transition hover:bg-rose-700"
-                >
-                  زیادکردنی ڕیزەی (-)
+                <button type="button" onClick={() => addRow('minus')}
+                  className="rounded-2xl bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-rose-700">
+                  + کەمبوو
                 </button>
               </div>
             </div>
 
-            <div className="grid gap-4">
-              <label className="space-y-2 text-sm font-medium text-slate-700">
+            <div className="grid gap-5">
+              {/* Organization */}
+              <label className="block text-sm font-medium text-slate-700">
                 ناوی ئۆرگان
-                <input
-                  type="text"
-                  value={formState.organization}
-                  onChange={(e) => setFormState((prev) => ({ ...prev, organization: e.target.value }))}
-                  placeholder="ناوی ئۆرگان"
-                  className="w-full rounded-3xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                />
+                <input type="text" value={formState.organization}
+                  onChange={e => setFormState(p => ({ ...p, organization: e.target.value }))}
+                  placeholder="ناوی ئۆرگان بنووسە"
+                  className="mt-1.5 w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100" />
               </label>
 
-              <label className="space-y-2 text-sm font-medium text-slate-700">
-                پەیامی ناردن بە سوپەرئەدمین (ئەگەر نیوەیەتی پێویست بیت)
-                <textarea
-                  rows={3}
-                  value={formState.messageToAdmin}
-                  onChange={(e) => setFormState((prev) => ({ ...prev, messageToAdmin: e.target.value }))}
-                  className="w-full rounded-3xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                  placeholder="پەیامێکت بنووسە"
-                />
-              </label>
-
-              <div className="overflow-x-auto rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-sm">
-                <h3 className="mb-4 text-lg font-semibold text-slate-900">کەل و پەلی زیادە</h3>
-                <table className="min-w-full border-separate border-spacing-0 text-right">
-                  <thead>
-                    <tr className="bg-slate-100 text-slate-600">
-                      <th className="border border-slate-200 p-3">جۆری کەل و پەل</th>
-                      <th className="border border-slate-200 p-3">ناوی کەل و پەل</th>
-                      <th className="border border-slate-200 p-3">ژمارە</th>
-                      <th className="border border-slate-200 p-3">وێنە</th>
-                      <th className="border border-slate-200 p-3">تێبینی</th>
-                      <th className="border border-slate-200 p-3">سڕینەوە</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {formState.rows.filter((row) => row.category === 'plus').map((row) => (
-                      <tr key={row.id} className="even:bg-white odd:bg-slate-50">
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="text"
-                            value={row.itemType}
-                            onChange={(e) => updateRow(row.id, { itemType: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="text"
-                            value={row.itemName}
-                            onChange={(e) => updateRow(row.id, { itemName: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="number"
-                            min={0}
-                            value={row.quantity}
-                            onChange={(e) => updateRow(row.id, { quantity: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={(e) => {
-                              const file = e.target.files?.[0] ?? null;
-                              const imageUrl = file ? URL.createObjectURL(file) : '';
-                              updateRow(row.id, { image: file, imageUrl });
-                            }}
-                            className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-slate-700 outline-none file:mr-4 file:rounded-full file:border-0 file:bg-slate-100 file:px-4 file:py-2 file:text-slate-700"
-                          />
-                          {row.imageUrl ? (
-                            <img src={row.imageUrl} alt="preview" className="mt-2 h-24 w-full rounded-xl object-contain" />
-                          ) : null}
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="text"
-                            value={row.notes}
-                            onChange={(e) => updateRow(row.id, { notes: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2 text-center">
-                          <button
-                            type="button"
-                            onClick={() => removeRow(row.id)}
-                            className="rounded-2xl bg-rose-500 px-4 py-2 text-white transition hover:bg-rose-600"
-                          >
-                            سڕینەوە
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {formState.rows.filter((row) => row.category === 'plus').length === 0 ? (
+              {/* Plus rows table */}
+              {formState.rows.filter(r => r.category === 'plus').length > 0 && (
+                <div className="overflow-x-auto rounded-2xl border border-emerald-200 bg-emerald-50/60 p-4">
+                  <h3 className="mb-3 font-semibold text-emerald-800 text-sm">کەل و پەلی زیادە (+)</h3>
+                  <table className="min-w-full border-separate border-spacing-0 text-right text-sm">
+                    <thead>
                       <tr>
-                        <td colSpan={6} className="border border-slate-200 p-4 text-center text-slate-500">
-                          هیچ کەل و پەلی زیادە نەدروستکراوە.
-                        </td>
+                        {['جۆری کەل و پەل', 'ناوی کەل و پەل', 'ژمارە', 'وێنە', 'تێبینی', ''].map(h => (
+                          <th key={h} className="border border-emerald-200 bg-emerald-100 px-3 py-2.5 font-semibold text-emerald-900 whitespace-nowrap">{h}</th>
+                        ))}
                       </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="overflow-x-auto rounded-3xl border border-slate-200 bg-slate-50 p-4 shadow-sm">
-                <h3 className="mb-4 text-lg font-semibold text-slate-900">کەل و پەلی کەمبوو</h3>
-                <table className="min-w-full border-separate border-spacing-0 text-right">
-                  <thead>
-                    <tr className="bg-slate-100 text-slate-600">
-                      <th className="border border-slate-200 p-3">جۆری کەل و پەل</th>
-                      <th className="border border-slate-200 p-3">ناوی کەل و پەل</th>
-                      <th className="border border-slate-200 p-3">ژمارە</th>
-                      <th className="border border-slate-200 p-3">کۆدی سیستەم</th>
-                      <th className="border border-slate-200 p-3">تێبینی</th>
-                      <th className="border border-slate-200 p-3">سڕینەوە</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {formState.rows.filter((row) => row.category === 'minus').map((row) => (
-                      <tr key={row.id} className="even:bg-white odd:bg-slate-50">
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="text"
-                            value={row.itemType}
-                            onChange={(e) => updateRow(row.id, { itemType: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="text"
-                            value={row.itemName}
-                            onChange={(e) => updateRow(row.id, { itemName: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="number"
-                            min={0}
-                            value={row.quantity}
-                            onChange={(e) => updateRow(row.id, { quantity: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="text"
-                            value={row.systemCode}
-                            onChange={(e) => updateRow(row.id, { systemCode: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2">
-                          <input
-                            type="text"
-                            value={row.notes}
-                            onChange={(e) => updateRow(row.id, { notes: e.target.value })}
-                            className="w-full rounded-2xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                          />
-                        </td>
-                        <td className="border border-slate-200 p-2 text-center">
-                          <button
-                            type="button"
-                            onClick={() => removeRow(row.id)}
-                            className="rounded-2xl bg-rose-500 px-4 py-2 text-white transition hover:bg-rose-600"
-                          >
-                            سڕینەوە
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {formState.rows.filter((row) => row.category === 'minus').length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="border border-slate-200 p-4 text-center text-slate-500">
-                          هیچ کەل و پەلی کەمبوو نەدروستکراوە.
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
-
-              {statusMessage ? (
-                <div className={`rounded-3xl p-4 text-sm font-medium ${
-                  statusMessage.type === 'success' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-                }`}>
-                  {statusMessage.text}
-                </div>
-              ) : (
-                <div className="rounded-3xl border border-slate-200 bg-slate-50 p-4 text-slate-600">
-                  فۆرمەکەت تکایە پڕبکە و دواتر پاشەکەوت یان ناردن بکە.
+                    </thead>
+                    <tbody>
+                      {formState.rows.filter(r => r.category === 'plus').map(row => (
+                        <tr key={row.id} className="bg-white">
+                          <td className="border border-emerald-200 p-1.5">
+                            <input value={row.itemType} onChange={e => updateRow(row.id, { itemType: e.target.value })}
+                              className="w-full min-w-[120px] rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-emerald-200 p-1.5">
+                            <input value={row.itemName} onChange={e => updateRow(row.id, { itemName: e.target.value })}
+                              className="w-full min-w-[140px] rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-emerald-200 p-1.5">
+                            <input type="number" min={0} value={row.quantity} onChange={e => updateRow(row.id, { quantity: e.target.value })}
+                              className="w-24 rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-emerald-200 p-1.5">
+                            <input type="file" accept="image/*"
+                              onChange={e => {
+                                const file = e.target.files?.[0] ?? null;
+                                updateRow(row.id, { image: file, imageUrl: file ? URL.createObjectURL(file) : '' });
+                              }}
+                              className="w-full text-xs file:rounded-full file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-slate-700" />
+                            {row.imageUrl && <img src={row.imageUrl} alt="" className="mt-1.5 h-14 object-contain" />}
+                          </td>
+                          <td className="border border-emerald-200 p-1.5">
+                            <input value={row.notes} onChange={e => updateRow(row.id, { notes: e.target.value })}
+                              className="w-full min-w-[120px] rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-emerald-200 p-1.5 text-center">
+                            <button onClick={() => removeRow(row.id)}
+                              className="rounded-xl bg-rose-500 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-600">
+                              سڕ
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
 
-              <div className="grid gap-3 sm:grid-cols-3">
-                <button
-                  type="button"
-                  onClick={handleSave}
-                  disabled={isSaving}
-                  className="rounded-3xl bg-sky-600 px-5 py-3 text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-                >
-                  پاشەکەوتکردن
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  disabled={isSaving}
-                  className="rounded-3xl bg-emerald-600 px-5 py-3 text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-                >
-                  ناردن بۆ سوپەرئەدمین
-                </button>
-                <button
-                  type="button"
-                  onClick={handleClear}
-                  className="rounded-3xl border border-slate-300 bg-white px-5 py-3 text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-                >
-                  سڕینەوە
-                </button>
-              </div>
+              {/* Minus rows table */}
+              {formState.rows.filter(r => r.category === 'minus').length > 0 && (
+                <div className="overflow-x-auto rounded-2xl border border-rose-200 bg-rose-50/60 p-4">
+                  <h3 className="mb-3 font-semibold text-rose-800 text-sm">کەل و پەلی کەمبوو (-)</h3>
+                  <table className="min-w-full border-separate border-spacing-0 text-right text-sm">
+                    <thead>
+                      <tr>
+                        {['جۆری کەل و پەل', 'ناوی کەل و پەل', 'ژمارە', 'کۆدی سیستەم', 'تێبینی', ''].map(h => (
+                          <th key={h} className="border border-rose-200 bg-rose-100 px-3 py-2.5 font-semibold text-rose-900 whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {formState.rows.filter(r => r.category === 'minus').map(row => (
+                        <tr key={row.id} className="bg-white">
+                          <td className="border border-rose-200 p-1.5">
+                            <input value={row.itemType} onChange={e => updateRow(row.id, { itemType: e.target.value })}
+                              className="w-full min-w-[120px] rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-rose-200 p-1.5">
+                            <input value={row.itemName} onChange={e => updateRow(row.id, { itemName: e.target.value })}
+                              className="w-full min-w-[140px] rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-rose-200 p-1.5">
+                            <input type="number" min={0} value={row.quantity} onChange={e => updateRow(row.id, { quantity: e.target.value })}
+                              className="w-24 rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-rose-200 p-1.5">
+                            <input value={row.systemCode} onChange={e => updateRow(row.id, { systemCode: e.target.value })}
+                              className="w-full min-w-[120px] rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-rose-200 p-1.5">
+                            <input value={row.notes} onChange={e => updateRow(row.id, { notes: e.target.value })}
+                              className="w-full min-w-[120px] rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-sky-500" />
+                          </td>
+                          <td className="border border-rose-200 p-1.5 text-center">
+                            <button onClick={() => removeRow(row.id)}
+                              className="rounded-xl bg-rose-500 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-600">
+                              سڕ
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
-              <div className="mt-4 text-right">
-                <button
-                  type="button"
-                  onClick={handlePrint}
-                  className="rounded-3xl bg-slate-900 px-5 py-3 text-white transition hover:bg-slate-700 print:hidden"
-                >
-                  چاپکردن
+              {/* Message to admin */}
+              <label className="block text-sm font-medium text-slate-700">
+                پەیام بۆ سوپەرئەدمین (ئەگەر پێویستت بوو)
+                <textarea rows={3} value={formState.messageToAdmin}
+                  onChange={e => setFormState(p => ({ ...p, messageToAdmin: e.target.value }))}
+                  placeholder="پەیامێکت بنووسە..."
+                  className="mt-1.5 w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100" />
+              </label>
+
+              {submitMsg && (
+                <div className={`rounded-2xl p-4 text-sm ${submitMsg.type === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+                  {submitMsg.text}
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="grid gap-3 sm:grid-cols-3">
+                <button type="button" onClick={() => submitForm('new')} disabled={isSaving}
+                  className="rounded-2xl bg-sky-600 px-5 py-3 font-semibold text-white hover:bg-sky-700 disabled:bg-slate-400 transition">
+                  {isSaving ? 'چاوەڕوانبکە...' : 'پاشەکەوتکردن (ڕەشنووس)'}
+                </button>
+                <button type="button" onClick={() => submitForm('sent')} disabled={isSaving}
+                  className="rounded-2xl bg-emerald-600 px-5 py-3 font-semibold text-white hover:bg-emerald-700 disabled:bg-slate-400 transition">
+                  {isSaving ? 'چاوەڕوانبکە...' : 'ناردن بۆ سوپەرئەدمین'}
+                </button>
+                <button type="button"
+                  onClick={() => { setFormState(blankForm); setSubmitMsg(null); }}
+                  className="rounded-2xl border border-slate-300 bg-white px-5 py-3 font-semibold text-slate-700 hover:bg-slate-50 transition">
+                  پاككردنەوە
                 </button>
               </div>
             </div>
           </div>
-        ) : null}
+        )}
 
-        {activePage === 'myForms' ? (
-          <div className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-paper print:hidden">
-            <h2 className="mb-4 text-2xl font-semibold text-slate-900">فۆرمەکانی من</h2>
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {/* VIEW: Success confirmation                                       */}
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {activePage === 'success' && (
+          <div className="rounded-[24px] border border-slate-200 bg-white p-10 shadow-sm text-center">
+            <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100">
+              <svg className="h-10 w-10 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h2 className="text-2xl font-bold text-slate-900 mb-2">فۆرم بە سەرکەوتوویی تۆمارکرا!</h2>
+            <p className="text-slate-500 mb-8">فۆرمەکەت پاشەکەوتکرا و بۆ سوپەرئەدمین نێردرا.</p>
+
+            <div className="inline-flex flex-col items-center rounded-2xl border-2 border-sky-200 bg-sky-50 px-10 py-5 mb-10">
+              <p className="text-sm font-medium text-sky-600 mb-1">ژمارەی فۆرم</p>
+              <p className="text-4xl font-bold font-mono tracking-wide text-sky-900">
+                {lastFormNumber ?? '---'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap justify-center gap-3">
+              <button type="button"
+                onClick={() => lastFormId && openFormDetail(lastFormId, 'success')}
+                className="rounded-2xl bg-sky-600 px-6 py-3 font-semibold text-white hover:bg-sky-700">
+                بینینی فۆرم (A4)
+              </button>
+              <button type="button"
+                onClick={() => { setActivePage('myForms'); fetchForms(); }}
+                className="rounded-2xl border border-slate-300 bg-white px-6 py-3 font-semibold text-slate-700 hover:bg-slate-50">
+                فۆرمەکانم
+              </button>
+              <button type="button" onClick={() => setActivePage('form')}
+                className="rounded-2xl border border-slate-300 bg-white px-6 py-3 font-semibold text-slate-700 hover:bg-slate-50">
+                فۆرمی تازە
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {/* VIEW: Forms list (staff = own, admin = all)                      */}
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {activePage === 'myForms' && (
+          <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="mb-5 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-slate-900">
+                {isSuperAdmin ? 'هەموو فۆرمەکان' : 'فۆرمەکانم'}
+              </h2>
+              <button onClick={fetchForms}
+                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                نوێکردنەوە
+              </button>
+            </div>
             <div className="overflow-x-auto">
-              <table className="min-w-full border-separate border-spacing-0 text-right">
+              <table className="min-w-full border-separate border-spacing-0 text-right text-sm">
                 <thead>
-                  <tr className="bg-slate-100 text-slate-600">
-                    <th className="border border-slate-200 p-3">ئۆرگان</th>
-                    <th className="border border-slate-200 p-3">ئیمەیڵ</th>
-                    <th className="border border-slate-200 p-3">ئاست</th>
-                    <th className="border border-slate-200 p-3">کاتژمێر</th>
+                  <tr>
+                    {['ژمارەی فۆرم', 'ئۆرگان', 'پێشکەشکار', 'ئاست', 'بەروار', 'کردار'].map(h => (
+                      <th key={h} className="border border-slate-200 bg-slate-50 px-4 py-3 font-semibold text-slate-600 whitespace-nowrap">{h}</th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
                   {forms.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="border border-slate-200 p-4 text-center text-slate-500">
-                        تا ئێستا هیچ فۆرمێک دروست نەکراوە.
+                      <td colSpan={6} className="border border-slate-200 p-10 text-center text-slate-400">
+                        هیچ فۆرمێک نییە.
                       </td>
                     </tr>
-                  ) : (
-                    forms.map((form) => (
-                      <tr key={form.id} className="even:bg-white odd:bg-slate-50">
-                        <td className="border border-slate-200 p-3">{form.organization}</td>
-                        <td className="border border-slate-200 p-3">{form.created_by_email}</td>
-                        <td className="border border-slate-200 p-3">{form.status}</td>
-                        <td className="border border-slate-200 p-3">{new Date(form.created_at).toLocaleString()}</td>
-                      </tr>
-                    ))
-                  )}
+                  ) : forms.map(form => (
+                    <tr key={form.id} className="odd:bg-white even:bg-slate-50 hover:bg-sky-50 transition-colors">
+                      <td className="border border-slate-200 px-4 py-3 font-mono font-bold text-sky-700">
+                        {form.form_number ?? '—'}
+                      </td>
+                      <td className="border border-slate-200 px-4 py-3 font-medium text-slate-900">{form.organization}</td>
+                      <td className="border border-slate-200 px-4 py-3 text-slate-500 text-xs">{form.created_by_email}</td>
+                      <td className="border border-slate-200 px-4 py-3">
+                        <StatusBadge status={form.status} />
+                      </td>
+                      <td className="border border-slate-200 px-4 py-3 text-slate-500 text-xs whitespace-nowrap">
+                        {formatDate(form.created_at)}
+                      </td>
+                      <td className="border border-slate-200 px-4 py-3 text-center">
+                        <button onClick={() => openFormDetail(form.id, 'myForms')}
+                          className="rounded-xl bg-sky-600 px-4 py-2 text-xs font-semibold text-white hover:bg-sky-700">
+                          بینین
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
           </div>
-        ) : null}
+        )}
 
-        {activePage === 'kanban' && isSuperAdmin ? (
-          <div className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-paper print:hidden">
-            <h2 className="mb-6 text-2xl font-semibold text-slate-900">کانبان</h2>
-            <div className="grid gap-4 xl:grid-cols-4">
-              {statusColumns.map((column) => (
-                <div key={column.key} className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                  <h3 className="mb-4 text-lg font-semibold text-slate-900">{column.label}</h3>
-                  <div className="space-y-4">
-                    {filteredForms(column.key).map((form) => (
-                      <div key={form.id} className="rounded-3xl bg-white border border-slate-200 p-4 shadow-sm">
-                        <div className="mb-3 text-sm text-slate-500">{form.created_by_email}</div>
-                        <h4 className="text-base font-semibold text-slate-900">{form.organization}</h4>
-                        <p className="mt-2 text-sm text-slate-600">{new Date(form.created_at).toLocaleString()}</p>
-                        <div className="mt-4 flex flex-wrap gap-2">
-                          {statusColumns
-                            .filter((item) => item.key !== column.key)
-                            .map((item) => (
-                              <button
-                                key={item.key}
-                                type="button"
-                                onClick={() => changeFormStatus(form.id, item.key)}
-                                className="rounded-full border border-slate-300 bg-white px-3 py-2 text-xs text-slate-700 transition hover:border-slate-400 hover:bg-slate-100"
-                              >
-                                بگۆڕە بۆ {item.label}
-                              </button>
-                            ))}
-                        </div>
-                      </div>
-                    ))}
-                    {filteredForms(column.key).length === 0 ? (
-                      <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-4 text-sm text-slate-500">
-                        هیچ فۆرمێک نییە.
-                      </div>
-                    ) : null}
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {/* VIEW: Form Detail — A4 official document                         */}
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {activePage === 'formDetail' && selectedForm && (
+          <div>
+            {/* Action bar (hidden on print) */}
+            <div className="no-print mb-4 flex flex-wrap items-center gap-3">
+              <button onClick={() => setActivePage(prevPage)}
+                className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                ← گەڕانەوە
+              </button>
+              <button onClick={() => window.print()}
+                className="rounded-2xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-700">
+                🖨 چاپکردن (A4)
+              </button>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-slate-500">ئاست:</span>
+                <StatusBadge status={selectedForm.status} />
+              </div>
+              {isSuperAdmin && (
+                <div className="flex flex-wrap gap-2">
+                  {STATUS_FLOW.filter(s => s !== selectedForm.status).map(s => (
+                    <button key={s} onClick={() => changeStatus(selectedForm.id, s)}
+                      className={`rounded-2xl border px-4 py-2 text-xs font-semibold transition ${STATUS[s].bg} ${STATUS[s].text} border-current hover:opacity-80`}>
+                      بگۆڕە بۆ {STATUS[s].label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* ── A4 Document ── */}
+            <div className="print-area a4-container mx-auto bg-white shadow-paper border border-slate-200 p-[15mm]">
+
+              {/* Document header */}
+              <div className="flex items-start justify-between border-b-2 border-black pb-4 mb-5">
+                <div className="flex flex-col items-center justify-center w-20 h-20 rounded-xl border-2 border-dashed border-slate-400 text-xs text-slate-400 shrink-0">
+                  <span className="text-lg">🏢</span>
+                  <span>لۆگۆ</span>
+                </div>
+                <div className="flex-1 text-center px-6">
+                  <h1 className="text-[22pt] font-bold text-black leading-tight">فۆرمی جیاوازییەکانی جەرد</h1>
+                  <p className="text-sm text-slate-500 mt-1">Inventory Variance Form</p>
+                </div>
+                <div className="shrink-0 text-sm space-y-1.5 min-w-[170px]">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold text-slate-600">ژمارەی فۆرم:</span>
+                    <span className="font-mono font-bold text-sky-800 text-base">{selectedForm.form_number ?? '—'}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold text-slate-600">بەروار:</span>
+                    <span>{formatDate(selectedForm.created_at)}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold text-slate-600">ئاست:</span>
+                    <StatusBadge status={selectedForm.status} />
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        {activePage === 'items' && isSuperAdmin ? (
-          <div className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-paper print:hidden">
-            <h2 className="mb-6 text-2xl font-semibold text-slate-900">زیادکردن و سڕینەوەی کەل و پەل</h2>
-
-            {/* Add item form */}
-            <div className="mb-8 rounded-3xl border border-violet-200 bg-violet-50 p-6">
-              <h3 className="mb-4 text-lg font-semibold text-slate-900">زیادکردنی کەل و پەلی نوێ</h3>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <label className="space-y-2 text-sm font-medium text-slate-700">
-                  جۆری تۆمار
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setAddItemCategory('plus')}
-                      className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold transition ${
-                        addItemCategory === 'plus' ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      زیادە (+)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAddItemCategory('minus')}
-                      className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold transition ${
-                        addItemCategory === 'minus' ? 'bg-rose-600 text-white' : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      کەمبوو (-)
-                    </button>
-                  </div>
-                </label>
-
-                <label className="space-y-2 text-sm font-medium text-slate-700">
-                  جۆری کەل و پەل
-                  <input
-                    type="text"
-                    value={addItemType}
-                    onChange={(e) => setAddItemType(e.target.value)}
-                    placeholder="بنووسە..."
-                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
-                  />
-                </label>
-
-                <label className="space-y-2 text-sm font-medium text-slate-700">
-                  ناوی کەل و پەل
-                  <input
-                    type="text"
-                    value={addItemName}
-                    onChange={(e) => setAddItemName(e.target.value)}
-                    placeholder="بنووسە..."
-                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
-                  />
-                </label>
-
-                <label className="space-y-2 text-sm font-medium text-slate-700">
-                  ژمارە
-                  <input
-                    type="number"
-                    min={1}
-                    value={addItemQuantity}
-                    onChange={(e) => setAddItemQuantity(e.target.value)}
-                    placeholder="0"
-                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
-                  />
-                </label>
-
-                {addItemCategory === 'minus' ? (
-                  <label className="space-y-2 text-sm font-medium text-slate-700">
-                    کۆدی سیستەم
-                    <input
-                      type="text"
-                      value={addItemSystemCode}
-                      onChange={(e) => setAddItemSystemCode(e.target.value)}
-                      placeholder="بنووسە..."
-                      className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
-                    />
-                  </label>
-                ) : null}
-
-                <label className="space-y-2 text-sm font-medium text-slate-700">
-                  تێبینی
-                  <input
-                    type="text"
-                    value={addItemNotes}
-                    onChange={(e) => setAddItemNotes(e.target.value)}
-                    placeholder="بنووسە..."
-                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none transition focus:border-violet-500 focus:ring-2 focus:ring-violet-100"
-                  />
-                </label>
               </div>
 
-              {itemsMessage ? (
-                <div className={`mt-4 rounded-3xl p-3 text-sm font-medium ${
-                  itemsMessage.type === 'success' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-                }`}>
-                  {itemsMessage.text}
+              {/* Info section */}
+              <div className="grid grid-cols-2 gap-4 mb-5 rounded-xl border border-slate-300 bg-slate-50 p-4 text-sm">
+                <div>
+                  <span className="font-semibold text-slate-600">ناوی ئۆرگان: </span>
+                  <span className="font-bold text-slate-900">{selectedForm.organization}</span>
                 </div>
-              ) : null}
+                <div>
+                  <span className="font-semibold text-slate-600">پێشکەشکراو لەلایەن: </span>
+                  <span className="text-slate-800">{selectedForm.created_by_email}</span>
+                </div>
+              </div>
 
-              <button
-                type="button"
-                onClick={handleAddDirectItem}
-                disabled={isAddingItem}
-                className="mt-4 rounded-3xl bg-violet-600 px-6 py-3 text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:bg-slate-400"
-              >
-                {isAddingItem ? 'چاوەڕوانبکە...' : 'زیادکردن'}
+              {/* Plus items table */}
+              <div className="mb-5">
+                <div className="rounded-t-xl bg-emerald-600 px-4 py-2.5">
+                  <h2 className="font-bold text-white text-sm">کەل و پەلی زیادە (+) — Surplus Items</h2>
+                </div>
+                <table className="w-full border-separate border-spacing-0 text-right text-sm">
+                  <thead>
+                    <tr className="bg-emerald-50">
+                      {['#', 'جۆری کەل و پەل', 'ناوی کەل و پەل', 'ژمارە', 'تێبینی'].map((h, i) => (
+                        <th key={h} className={`border border-emerald-200 px-3 py-2.5 font-semibold text-emerald-900 ${i === 0 ? 'w-10 text-center' : ''}`}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedForm.plusItems.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="border border-slate-200 p-4 text-center text-slate-400 italic">
+                          هیچ کەل و پەلی زیادەیەک نییە
+                        </td>
+                      </tr>
+                    ) : selectedForm.plusItems.map((item, i) => (
+                      <tr key={item.id} className={i % 2 === 0 ? 'bg-white' : 'bg-emerald-50/30'}>
+                        <td className="border border-slate-200 px-3 py-2.5 text-center text-slate-500 font-medium">{i + 1}</td>
+                        <td className="border border-slate-200 px-3 py-2.5">{item.item_type}</td>
+                        <td className="border border-slate-200 px-3 py-2.5 font-semibold">{item.item_name}</td>
+                        <td className="border border-slate-200 px-3 py-2.5 text-center font-bold text-emerald-700">{item.quantity}</td>
+                        <td className="border border-slate-200 px-3 py-2.5 text-slate-500">{item.notes ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Minus items table */}
+              <div className="mb-5">
+                <div className="rounded-t-xl bg-rose-600 px-4 py-2.5">
+                  <h2 className="font-bold text-white text-sm">کەل و پەلی کەمبوو (-) — Deficit Items</h2>
+                </div>
+                <table className="w-full border-separate border-spacing-0 text-right text-sm">
+                  <thead>
+                    <tr className="bg-rose-50">
+                      {['#', 'جۆری کەل و پەل', 'ناوی کەل و پەل', 'ژمارە', 'کۆدی سیستەم', 'تێبینی'].map((h, i) => (
+                        <th key={h} className={`border border-rose-200 px-3 py-2.5 font-semibold text-rose-900 ${i === 0 ? 'w-10 text-center' : ''}`}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedForm.minusItems.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="border border-slate-200 p-4 text-center text-slate-400 italic">
+                          هیچ کەل و پەلی کەمبووێک نییە
+                        </td>
+                      </tr>
+                    ) : selectedForm.minusItems.map((item, i) => (
+                      <tr key={item.id} className={i % 2 === 0 ? 'bg-white' : 'bg-rose-50/30'}>
+                        <td className="border border-slate-200 px-3 py-2.5 text-center text-slate-500 font-medium">{i + 1}</td>
+                        <td className="border border-slate-200 px-3 py-2.5">{item.item_type}</td>
+                        <td className="border border-slate-200 px-3 py-2.5 font-semibold">{item.item_name}</td>
+                        <td className="border border-slate-200 px-3 py-2.5 text-center font-bold text-rose-700">{item.quantity}</td>
+                        <td className="border border-slate-200 px-3 py-2.5 font-mono text-slate-700">{item.system_code}</td>
+                        <td className="border border-slate-200 px-3 py-2.5 text-slate-500">{item.notes ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Message to admin */}
+              {selectedForm.message_to_admin && (
+                <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm">
+                  <span className="font-semibold text-amber-800">پەیام بۆ سوپەرئەدمین: </span>
+                  <span className="text-amber-900">{selectedForm.message_to_admin}</span>
+                </div>
+              )}
+
+              {/* Signature section */}
+              <div className="mt-10 grid grid-cols-2 gap-16 border-t-2 border-black pt-8">
+                <div className="text-center">
+                  <p className="font-semibold text-slate-700 mb-1 text-sm">ناوی کارمەند</p>
+                  <p className="text-xs text-slate-500 mb-16">{selectedForm.created_by_email}</p>
+                  <div className="border-t border-black mx-4"></div>
+                  <p className="text-xs text-slate-500 mt-1.5">واژۆ و بەروار</p>
+                </div>
+                <div className="text-center">
+                  <p className="font-semibold text-slate-700 mb-1 text-sm">سوپەر ئەدمین</p>
+                  <p className="text-xs text-slate-500 mb-16">{superAdminEmail}</p>
+                  <div className="border-t border-black mx-4"></div>
+                  <p className="text-xs text-slate-500 mt-1.5">واژۆ و پەسەندکردن</p>
+                </div>
+              </div>
+
+            </div>{/* /a4-container */}
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {/* VIEW: Kanban (superadmin only)                                   */}
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {activePage === 'kanban' && isSuperAdmin && (
+          <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="mb-5 flex items-center justify-between">
+              <h2 className="text-lg font-bold text-slate-900">کانبانی فۆرمەکان</h2>
+              <button onClick={fetchForms}
+                className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50">
+                نوێکردنەوە
+              </button>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {STATUS_FLOW.map(key => {
+                const cfg = STATUS[key];
+                const colForms = forms.filter(f => f.status === key);
+                return (
+                  <div key={key} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="mb-4 flex items-center justify-between">
+                      <h3 className="font-semibold text-slate-800">{cfg.label}</h3>
+                      <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${cfg.bg} ${cfg.text}`}>
+                        {colForms.length}
+                      </span>
+                    </div>
+                    <div className="space-y-3">
+                      {colForms.map(form => (
+                        <div key={form.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                          <p className="text-xs font-mono font-bold text-sky-700 mb-1">{form.form_number ?? '—'}</p>
+                          <p className="font-semibold text-sm text-slate-900">{form.organization}</p>
+                          <p className="text-xs text-slate-500 mt-0.5">{form.created_by_email}</p>
+                          <p className="text-xs text-slate-400 mt-0.5">{formatDate(form.created_at)}</p>
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            <button onClick={() => openFormDetail(form.id, 'kanban')}
+                              className="rounded-full bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700">
+                              بینین
+                            </button>
+                            {STATUS_FLOW.filter(s => s !== key).map(s => (
+                              <button key={s} onClick={() => changeStatus(form.id, s)}
+                                className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${STATUS[s].bg} ${STATUS[s].text}`}>
+                                → {STATUS[s].label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                      {colForms.length === 0 && (
+                        <div className="rounded-2xl border-2 border-dashed border-slate-300 p-5 text-center text-sm text-slate-400">
+                          هیچ فۆرمێک نییە
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {/* VIEW: Items management (superadmin only)                         */}
+        {/* ════════════════════════════════════════════════════════════════ */}
+        {activePage === 'items' && isSuperAdmin && (
+          <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-bold text-slate-900 mb-6">زیادکردن و سڕینەوەی کەل و پەل</h2>
+
+            {/* Add form */}
+            <div className="mb-8 rounded-2xl border border-violet-200 bg-violet-50 p-5">
+              <h3 className="font-semibold text-slate-900 mb-4">زیادکردنی کەل و پەلی نوێ</h3>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <label className="block text-sm font-medium text-slate-700">
+                  جۆری تۆمار
+                  <div className="mt-1.5 flex gap-2">
+                    {(['plus', 'minus'] as const).map(cat => (
+                      <button key={cat} type="button" onClick={() => setAddCat(cat)}
+                        className={`flex-1 rounded-full py-2 text-sm font-semibold transition ${
+                          addCat === cat
+                            ? (cat === 'plus' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white')
+                            : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+                        }`}>
+                        {cat === 'plus' ? 'زیادە (+)' : 'کەمبوو (-)'}
+                      </button>
+                    ))}
+                  </div>
+                </label>
+                {[
+                  { label: 'جۆری کەل و پەل', val: addType, set: setAddType },
+                  { label: 'ناوی کەل و پەل', val: addName, set: setAddName },
+                  { label: 'ژمارە',           val: addQty,  set: setAddQty, type: 'number' },
+                  ...(addCat === 'minus' ? [{ label: 'کۆدی سیستەم', val: addCode, set: setAddCode }] : []),
+                  { label: 'تێبینی', val: addNotes, set: setAddNotes },
+                ].map(field => (
+                  <label key={field.label} className="block text-sm font-medium text-slate-700">
+                    {field.label}
+                    <input type={(field as any).type ?? 'text'} value={field.val}
+                      onChange={e => field.set(e.target.value)} placeholder="بنووسە..."
+                      className="mt-1.5 w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100" />
+                  </label>
+                ))}
+              </div>
+              {itemsMsg && (
+                <div className={`mt-4 rounded-2xl p-3 text-sm ${itemsMsg.type === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-rose-50 text-rose-800'}`}>
+                  {itemsMsg.text}
+                </div>
+              )}
+              <button type="button" onClick={handleAddItem} disabled={isAdding}
+                className="mt-4 rounded-2xl bg-violet-600 px-6 py-3 font-semibold text-white hover:bg-violet-700 disabled:bg-slate-400 transition">
+                {isAdding ? 'چاوەڕوانبکە...' : 'زیادکردن'}
               </button>
             </div>
 
             {/* Items list */}
-            <h3 className="mb-4 text-lg font-semibold text-slate-900">هەموو کەل و پەلەکان</h3>
+            <h3 className="font-semibold text-slate-900 mb-4">هەموو کەل و پەلەکان ({allItems.length})</h3>
             <div className="overflow-x-auto">
-              <table className="min-w-full border-separate border-spacing-0 text-right">
+              <table className="min-w-full border-separate border-spacing-0 text-right text-sm">
                 <thead>
-                  <tr className="bg-slate-100 text-slate-600">
-                    <th className="border border-slate-200 p-3">جۆر</th>
-                    <th className="border border-slate-200 p-3">جۆری کەل و پەل</th>
-                    <th className="border border-slate-200 p-3">ناوی کەل و پەل</th>
-                    <th className="border border-slate-200 p-3">ژمارە</th>
-                    <th className="border border-slate-200 p-3">کۆدی سیستەم</th>
-                    <th className="border border-slate-200 p-3">تێبینی</th>
-                    <th className="border border-slate-200 p-3">کاتژمێر</th>
-                    <th className="border border-slate-200 p-3">سڕینەوە</th>
+                  <tr>
+                    {['جۆر', 'جۆری کەل و پەل', 'ناوی کەل و پەل', 'ژمارە', 'کۆدی سیستەم', 'تێبینی', 'بەروار', ''].map(h => (
+                      <th key={h} className="border border-slate-200 bg-slate-50 px-4 py-3 font-semibold text-slate-600 whitespace-nowrap">{h}</th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
                   {allItems.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="border border-slate-200 p-4 text-center text-slate-500">
+                      <td colSpan={8} className="border border-slate-200 p-8 text-center text-slate-400">
                         هیچ کەل و پەلێک نییە.
                       </td>
                     </tr>
-                  ) : (
-                    allItems.map((item) => (
-                      <tr key={`${item.category}-${item.id}`} className="even:bg-white odd:bg-slate-50">
-                        <td className="border border-slate-200 p-3">
-                          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                            item.category === 'plus'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-rose-100 text-rose-800'
-                          }`}>
-                            {item.category === 'plus' ? 'زیادە (+)' : 'کەمبوو (-)'}
-                          </span>
-                        </td>
-                        <td className="border border-slate-200 p-3">{item.item_type}</td>
-                        <td className="border border-slate-200 p-3">{item.item_name}</td>
-                        <td className="border border-slate-200 p-3">{item.quantity}</td>
-                        <td className="border border-slate-200 p-3">{item.system_code ?? '—'}</td>
-                        <td className="border border-slate-200 p-3">{item.notes ?? '—'}</td>
-                        <td className="border border-slate-200 p-3 text-sm text-slate-500">
-                          {new Date(item.created_at).toLocaleString()}
-                        </td>
-                        <td className="border border-slate-200 p-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteItem(item.id, item.category)}
-                            className="rounded-2xl bg-rose-500 px-4 py-2 text-white transition hover:bg-rose-600"
-                          >
-                            سڕینەوە
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
+                  ) : allItems.map(item => (
+                    <tr key={`${item.category}-${item.id}`} className="odd:bg-white even:bg-slate-50">
+                      <td className="border border-slate-200 px-3 py-2.5">
+                        <span className={`rounded-full px-3 py-1 text-xs font-semibold ${item.category === 'plus' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>
+                          {item.category === 'plus' ? 'زیادە' : 'کەمبوو'}
+                        </span>
+                      </td>
+                      <td className="border border-slate-200 px-3 py-2.5">{item.item_type}</td>
+                      <td className="border border-slate-200 px-3 py-2.5 font-medium">{item.item_name}</td>
+                      <td className="border border-slate-200 px-3 py-2.5 text-center font-bold">{item.quantity}</td>
+                      <td className="border border-slate-200 px-3 py-2.5 font-mono text-xs">{item.system_code ?? '—'}</td>
+                      <td className="border border-slate-200 px-3 py-2.5 text-slate-500">{item.notes ?? '—'}</td>
+                      <td className="border border-slate-200 px-3 py-2.5 text-xs text-slate-400 whitespace-nowrap">
+                        {formatDate(item.created_at)}
+                      </td>
+                      <td className="border border-slate-200 px-3 py-2.5 text-center">
+                        <button onClick={() => handleDeleteItem(item.id, item.category)}
+                          className="rounded-xl bg-rose-500 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-600">
+                          سڕینەوە
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
           </div>
-        ) : null}
+        )}
+
       </div>
     </div>
   );
