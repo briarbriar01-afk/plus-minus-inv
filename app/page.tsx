@@ -694,24 +694,7 @@ export default function HomePage() {
                 {/* Document header */}
                 <div className="border-b-2 border-black pb-4 mb-5 text-center">
                   <h1 style={{ fontSize: '18pt', fontWeight: 'bold' }}>فۆرمی جیاوازییەکانی جەرد</h1>
-                  <p style={{ fontSize: '10pt', color: '#475569', marginTop: '4px' }}>Inventory Variance Form</p>
-                </div>
-
-                {/* Form meta info */}
-                <div className="grid grid-cols-2 gap-4 mb-5 rounded-xl border border-slate-300 bg-slate-50 p-4"
-                  style={{ fontSize: '11pt' }}>
-                  <div>
-                    <span className="font-semibold text-slate-600">ناوی ئۆرگان: </span>
-                    <span className="font-bold">{formState.organization || '_______________'}</span>
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-600">پێشکەشکراو لەلایەن: </span>
-                    <span>{user?.email}</span>
-                  </div>
-                  <div>
-                    <span className="font-semibold text-slate-600">بەروار: </span>
-                    <span>{formatDate(new Date().toISOString())}</span>
-                  </div>
+                  <p style={{ fontSize: '12pt', marginTop: '6px', fontWeight: '600' }}>{formState.organization || '_______________'}</p>
                 </div>
 
                 {/* Plus items */}
@@ -793,21 +776,6 @@ export default function HomePage() {
                   </div>
                 )}
 
-                {/* Signature lines */}
-                <div style={{ marginTop: '48px', borderTop: '2px solid black', paddingTop: '32px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '64px' }}>
-                  <div style={{ textAlign: 'center' }}>
-                    <p style={{ fontWeight: '600', marginBottom: '48px', fontSize: '11pt' }}>واژووی تەواوکەر</p>
-                    <p style={{ color: '#64748b', fontSize: '10pt', marginBottom: '4px' }}>{user?.email}</p>
-                    <div style={{ borderTop: '1px solid black', margin: '0 16px' }}></div>
-                    <p style={{ color: '#94a3b8', fontSize: '9pt', marginTop: '4px' }}>ناو و واژۆ</p>
-                  </div>
-                  <div style={{ textAlign: 'center' }}>
-                    <p style={{ fontWeight: '600', marginBottom: '48px', fontSize: '11pt' }}>واژووی بەڕێوەبەر</p>
-                    <p style={{ color: '#64748b', fontSize: '10pt', marginBottom: '4px' }}>{superAdminEmail || '_______________'}</p>
-                    <div style={{ borderTop: '1px solid black', margin: '0 16px' }}></div>
-                    <p style={{ color: '#94a3b8', fontSize: '9pt', marginTop: '4px' }}>ناو و واژۆ</p>
-                  </div>
-                </div>
 
               </div>
             </div>
@@ -980,41 +948,9 @@ export default function HomePage() {
             <div className="print-area a4-container mx-auto bg-white shadow-paper border border-slate-200 p-[15mm]">
 
               {/* Document header */}
-              <div className="flex items-start justify-between border-b-2 border-black pb-4 mb-5">
-                <div className="flex flex-col items-center justify-center w-20 h-20 rounded-xl border-2 border-dashed border-slate-400 text-xs text-slate-400 shrink-0">
-                  <span className="text-lg">🏢</span>
-                  <span>لۆگۆ</span>
-                </div>
-                <div className="flex-1 text-center px-6">
-                  <h1 className="text-[22pt] font-bold text-black leading-tight">فۆرمی جیاوازییەکانی جەرد</h1>
-                  <p className="text-sm text-slate-500 mt-1">Inventory Variance Form</p>
-                </div>
-                <div className="shrink-0 text-sm space-y-1.5 min-w-[170px]">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-semibold text-slate-600">ژمارەی فۆرم:</span>
-                    <span className="font-mono font-bold text-sky-800 text-base">{selectedForm.form_number ?? '—'}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-semibold text-slate-600">بەروار:</span>
-                    <span>{formatDate(selectedForm.created_at)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-semibold text-slate-600">ئاست:</span>
-                    <StatusBadge status={selectedForm.status} />
-                  </div>
-                </div>
-              </div>
-
-              {/* Info section */}
-              <div className="grid grid-cols-2 gap-4 mb-5 rounded-xl border border-slate-300 bg-slate-50 p-4 text-sm">
-                <div>
-                  <span className="font-semibold text-slate-600">ناوی ئۆرگان: </span>
-                  <span className="font-bold text-slate-900">{selectedForm.organization}</span>
-                </div>
-                <div>
-                  <span className="font-semibold text-slate-600">پێشکەشکراو لەلایەن: </span>
-                  <span className="text-slate-800">{selectedForm.created_by_email}</span>
-                </div>
+              <div className="border-b-2 border-black pb-4 mb-5 text-center">
+                <h1 className="text-[22pt] font-bold text-black leading-tight">فۆرمی جیاوازییەکانی جەرد</h1>
+                <p className="text-base font-semibold text-slate-800 mt-2">{selectedForm.organization}</p>
               </div>
 
               {/* Plus items table */}
@@ -1092,21 +1028,6 @@ export default function HomePage() {
                 </div>
               )}
 
-              {/* Signature section */}
-              <div className="mt-10 grid grid-cols-2 gap-16 border-t-2 border-black pt-8">
-                <div className="text-center">
-                  <p className="font-semibold text-slate-700 mb-1 text-sm">ناوی کارمەند</p>
-                  <p className="text-xs text-slate-500 mb-16">{selectedForm.created_by_email}</p>
-                  <div className="border-t border-black mx-4"></div>
-                  <p className="text-xs text-slate-500 mt-1.5">واژۆ و بەروار</p>
-                </div>
-                <div className="text-center">
-                  <p className="font-semibold text-slate-700 mb-1 text-sm">سوپەر ئەدمین</p>
-                  <p className="text-xs text-slate-500 mb-16">{superAdminEmail}</p>
-                  <div className="border-t border-black mx-4"></div>
-                  <p className="text-xs text-slate-500 mt-1.5">واژۆ و پەسەندکردن</p>
-                </div>
-              </div>
 
             </div>{/* /a4-container */}
           </div>
