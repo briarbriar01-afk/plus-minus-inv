@@ -55,7 +55,7 @@ th {
 @media print {
   @page {
     size: A4 portrait;
-    margin: 12mm 14mm;
+    margin: 15mm;
   }
 
   html, body {
@@ -65,12 +65,33 @@ th {
     color: #000 !important;
     font-size: 9pt !important;
     line-height: 1.3 !important;
+    direction: rtl !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
   /* ── Hide interactive UI elements ── */
+  button,
   .no-print,
-  .print-hidden {
+  .print-hidden,
+  [class*="bg-red-50"],
+  [class*="text-red-800"] {
     display: none !important;
+  }
+
+  /* ── Make inputs look like clean text rows ── */
+  input,
+  textarea {
+    border: none !important;
+    border-bottom: 1px dashed #ccc !important;
+    background: transparent !important;
+    padding: 2px !important;
+    box-shadow: none !important;
+  }
+
+  /* ── Hide file picker chrome ── */
+  input[type="file"] {
+    color: transparent !important;
   }
 
   /* ── A4 container ── */
