@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import * as XLSX from 'xlsx';
 import { supabase } from '../lib/supabaseClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -502,6 +503,44 @@ export default function HomePage() {
     fetchAllItems();
   };
 
+  // ── Download form rows as Excel ───────────────────────────────────────────
+  const handleDownloadExcel = () => {
+    const workbook = XLSX.utils.book_new();
+    const date = new Date().toISOString().split('T')[0];
+
+    const plusRows = formState.rows.filter(r => r.category === 'plus');
+    if (plusRows.length > 0) {
+      const plusData = plusRows.map((row, i) => ({
+        'ڕیزبەندی': i + 1,
+        'جۆری کەل و پەل': row.itemType,
+        'ناوی کەل و پەل': row.itemName,
+        'ژمارە': row.quantity,
+        'تێبینی': row.notes,
+      }));
+      const ws = XLSX.utils.json_to_sheet(plusData);
+      ws['!dir'] = 'rtl';
+      XLSX.utils.book_append_sheet(workbook, ws, 'کەل و پەلی زیادە');
+    }
+
+    const minusRows = formState.rows.filter(r => r.category === 'minus');
+    if (minusRows.length > 0) {
+      const minusData = minusRows.map((row, i) => ({
+        'ڕیزبەندی': i + 1,
+        'جۆری کەل و پەل': row.itemType,
+        'ناوی کەل و پەل': row.itemName,
+        'ژمارە': row.quantity,
+        'کۆدی سیستەم': row.systemCode,
+        'تێبینی': row.notes,
+      }));
+      const ws = XLSX.utils.json_to_sheet(minusData);
+      ws['!dir'] = 'rtl';
+      XLSX.utils.book_append_sheet(workbook, ws, 'کەل و پەلی کەمبوو');
+    }
+
+    if (workbook.SheetNames.length === 0) return;
+    XLSX.writeFile(workbook, `فۆرمی_جەرد_${date}.xlsx`);
+  };
+
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER
   // ─────────────────────────────────────────────────────────────────────────
@@ -751,7 +790,7 @@ export default function HomePage() {
               )}
 
               {/* Action buttons */}
-              <div className="grid gap-3 sm:grid-cols-4 no-print">
+              <div className="grid gap-3 sm:grid-cols-5 no-print">
                 <button type="button" onClick={() => submitForm('new')} disabled={isSaving}
                   className="rounded-2xl bg-sky-600 px-5 py-3 font-semibold text-white hover:bg-sky-700 disabled:bg-slate-400 transition">
                   {isSaving ? 'چاوەڕوانبکە...' : 'پاشەکەوتکردن (ڕەشنووس)'}
@@ -765,7 +804,15 @@ export default function HomePage() {
                   className="rounded-2xl border border-slate-300 bg-white px-5 py-3 font-semibold text-slate-700 hover:bg-slate-50 transition">
                   پاككردنەوە
                 </button>
-                {/* 🖨 Print current form */}
+                {/* Excel download */}
+                <button type="button" onClick={handleDownloadExcel}
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-teal-600 px-5 py-3 font-semibold text-white hover:bg-teal-700 transition">
+                  <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Excel
+                </button>
+                {/* Print current form */}
                 <button type="button" onClick={() => window.print()}
                   className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-800 px-5 py-3 font-semibold text-white hover:bg-slate-900 transition">
                   <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
