@@ -287,8 +287,7 @@ export default function HomePage() {
     setIsPdfLoading(true);
     try {
       // Dynamic import keeps html2pdf.js out of the SSR bundle
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const html2pdf = ((await import('html2pdf.js')) as any).default;
+      const html2pdf = ((await import('html2pdf.js')) as any).default; // eslint-disable-line
       await html2pdf()
         .set({
           margin: [8, 8, 8, 8],
