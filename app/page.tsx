@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabaseClient';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -144,7 +144,11 @@ export default function HomePage() {
   const [forms, setForms] = useState<FormSummary[]>([]);
 
   // ── Form detail (A4 view) ─────────────────────────────────────────────────
+  const [formDetailId, setFormDetailId] = useState<string | null>(null);
   const [selectedForm, setSelectedForm] = useState<FormDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [isPdfLoading, setIsPdfLoading] = useState(false);
+  const a4Ref = useRef<HTMLDivElement>(null);
 
   // ── Admin: direct items ───────────────────────────────────────────────────
   const [allItems, setAllItems] = useState<AllItem[]>([]);
@@ -187,6 +191,52 @@ export default function HomePage() {
       return () => clearTimeout(t);
     }
   }, [autoPrint, selectedForm, activePage]);
+
+  // Fetch form detail whenever formDetailId changes
+  useEffect(() => {
+    if (!formDetailId) return;
+    let cancelled = false;
+
+    const fetchDetail = async () => {
+      setDetailLoading(true);
+      setDetailError(null);
+      setSelectedForm(null);
+
+      const [formRes, plusRes, minusRes] = await Promise.all([
+        supabase.from('inventory_forms').select('*').eq('id', formDetailId).single(),
+        supabase.from('plus_items').select('*').eq('form_id', formDetailId).order('created_at'),
+        supabase.from('minus_items').select('*').eq('form_id', formDetailId).order('created_at'),
+      ]);
+
+      if (cancelled) return;
+
+      if (formRes.error || !formRes.data) {
+        setDetailError(`هەڵە لە بارکردنی فۆرم: ${formRes.error?.message ?? 'فۆرم نەدۆزرایەوە'}`);
+        setDetailLoading(false);
+        return;
+      }
+      if (plusRes.error) {
+        setDetailError(`هەڵە لە بارکردنی کەل و پەلی زیاد: ${plusRes.error.message}`);
+        setDetailLoading(false);
+        return;
+      }
+      if (minusRes.error) {
+        setDetailError(`هەڵە لە بارکردنی کەل و پەلی کەم: ${minusRes.error.message}`);
+        setDetailLoading(false);
+        return;
+      }
+
+      setSelectedForm({
+        ...formRes.data,
+        plusItems: plusRes.data ?? [],
+        minusItems: minusRes.data ?? [],
+      });
+      setDetailLoading(false);
+    };
+
+    fetchDetail();
+    return () => { cancelled = true; };
+  }, [formDetailId]);
 
   // ── Auth actions ──────────────────────────────────────────────────────────
   const handleAuth = async () => {
@@ -231,25 +281,38 @@ export default function HomePage() {
     setForms(data ?? []);
   };
 
-  // ── Open A4 detail view ───────────────────────────────────────────────────
-  const openFormDetail = async (formId: string, from: PageView = 'myForms', print = false) => {
-    setDetailLoading(true);
-    const [formRes, plusRes, minusRes] = await Promise.all([
-      supabase.from('inventory_forms').select('*').eq('id', formId).single(),
-      supabase.from('plus_items').select('*').eq('form_id', formId).order('created_at'),
-      supabase.from('minus_items').select('*').eq('form_id', formId).order('created_at'),
-    ]);
-    setDetailLoading(false);
-    if (formRes.data) {
-      setSelectedForm({
-        ...formRes.data,
-        plusItems: plusRes.data ?? [],
-        minusItems: minusRes.data ?? [],
-      });
-      setPrevPage(from);
-      if (print) setAutoPrint(true);
-      setActivePage('formDetail');
+  // ── Download A4 as PDF ────────────────────────────────────────────────────
+  const downloadPdf = async () => {
+    if (!a4Ref.current || !selectedForm) return;
+    setIsPdfLoading(true);
+    try {
+      // Dynamic import keeps html2pdf.js out of the SSR bundle
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const html2pdf = ((await import('html2pdf.js')) as any).default;
+      await html2pdf()
+        .set({
+          margin: [8, 8, 8, 8],
+          filename: `inventory-form-${selectedForm.id}.pdf`,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true, logging: false },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+        })
+        .from(a4Ref.current)
+        .save();
+    } finally {
+      setIsPdfLoading(false);
     }
+  };
+
+  // ── Open A4 detail view ───────────────────────────────────────────────────
+  const openFormDetail = (formId: string, from: PageView = 'myForms', print = false) => {
+    setPrevPage(from);
+    if (print) setAutoPrint(true);
+    setSelectedForm(null);
+    setDetailError(null);
+    setDetailLoading(true);
+    setFormDetailId(formId);
+    setActivePage('formDetail');
   };
 
   // ── Fetch all items (admin) ───────────────────────────────────────────────
@@ -307,6 +370,7 @@ export default function HomePage() {
     setIsSaving(true);
     setSubmitMsg(null);
 
+    let createdFormId: string | null = null;
     try {
       // 1. Insert form row
       const { data: formRecord, error: formErr } = await supabase
@@ -322,6 +386,7 @@ export default function HomePage() {
         .single();
 
       if (formErr || !formRecord) throw formErr ?? new Error('تۆمارکردنی فۆرم سەرکەوتنەبوو');
+      createdFormId = formRecord.id;
 
       // 2. Insert plus items
       const plusRows = formState.rows.filter(r => r.category === 'plus');
@@ -357,6 +422,10 @@ export default function HomePage() {
       setFormState(blankForm);
       setActivePage('success');
     } catch (e) {
+      // Roll back the form record so it doesn't appear in the list without items
+      if (createdFormId) {
+        await supabase.from('inventory_forms').delete().eq('id', createdFormId);
+      }
       setSubmitMsg({ type: 'error', text: `هەڵەیەک ڕوویدا: ${(e as Error).message}` });
     } finally {
       setIsSaving(false);
@@ -368,6 +437,30 @@ export default function HomePage() {
     await supabase.from('inventory_forms').update({ status: next }).eq('id', formId);
     setSelectedForm(p => p?.id === formId ? { ...p, status: next } : p);
     setForms(prev => prev.map(f => f.id === formId ? { ...f, status: next } : f));
+  };
+
+  // ── Delete form ───────────────────────────────────────────────────────────
+  const deleteForm = async (formId: string) => {
+    if (!window.confirm('ئایا دڵنیایت دەتەوێت ئەم فۆرمە بسڕیتەوە؟ ئەم کردارە گەڕاندنەوەیەکی نییە.')) return;
+
+    const { data: plusItems } = await supabase
+      .from('plus_items').select('image_path').eq('form_id', formId);
+
+    const imagePaths = (plusItems ?? [])
+      .map((i: any) => i.image_path).filter(Boolean) as string[];
+    if (imagePaths.length > 0) {
+      await supabase.storage.from('inventory_images').remove(imagePaths);
+    }
+
+    await supabase.from('plus_items').delete().eq('form_id', formId);
+    await supabase.from('minus_items').delete().eq('form_id', formId);
+    await supabase.from('inventory_forms').delete().eq('id', formId);
+
+    setForms(prev => prev.filter(f => f.id !== formId));
+    if (selectedForm?.id === formId) {
+      setSelectedForm(null);
+      setActivePage('myForms');
+    }
   };
 
   // ── Admin: add direct item ────────────────────────────────────────────────
@@ -690,7 +783,7 @@ export default function HomePage() {
 
                 {/* Document header */}
                 <div className="border-b-2 border-black pb-4 mb-5 text-center">
-                  <h1 style={{ fontSize: '18pt', fontWeight: 'bold' }}>فۆرمی جیاوازییەکانی جەرد</h1>
+                  <h1 style={{ fontSize: '18pt', fontWeight: 'bold' }}>کەل و پەلی زیاد و کەمی جەرد</h1>
                   <p style={{ fontSize: '12pt', marginTop: '6px', fontWeight: '600' }}>{formState.organization || '_______________'}</p>
                 </div>
 
@@ -698,13 +791,13 @@ export default function HomePage() {
                 <div className="mb-5">
                   <div className="rounded-t-lg px-4 py-2" style={{ background: '#059669' }}>
                     <h2 style={{ color: 'white', fontWeight: 'bold', fontSize: '12pt', margin: 0 }}>
-                      کەل و پەلی زیادە (+) — Surplus Items
+                      کەل و پەلی زیاد (+)
                     </h2>
                   </div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11pt' }}>
                     <thead>
                       <tr style={{ background: '#f0fdf4' }}>
-                        {['ژمارە', 'جۆری کەلوپەل', 'ناوی کەلوپەل', 'بڕ', 'تێبینی'].map(h => (
+                        {['ژمارە', 'جۆری کەلوپەل', 'ناوی کەلوپەل', 'بڕ', 'وێنە', 'تێبینی'].map(h => (
                           <th key={h} style={{ border: '1px solid #a7f3d0', padding: '8px', textAlign: 'right', fontWeight: '600' }}>{h}</th>
                         ))}
                       </tr>
@@ -712,7 +805,7 @@ export default function HomePage() {
                     <tbody>
                       {formState.rows.filter(r => r.category === 'plus').length === 0 ? (
                         <tr>
-                          <td colSpan={5} style={{ border: '1px solid #e2e8f0', padding: '10px', textAlign: 'center', color: '#94a3b8', fontStyle: 'italic' }}>
+                          <td colSpan={6} style={{ border: '1px solid #e2e8f0', padding: '10px', textAlign: 'center', color: '#94a3b8', fontStyle: 'italic' }}>
                             هیچ کەل و پەلی زیادەیەک نییە
                           </td>
                         </tr>
@@ -722,6 +815,11 @@ export default function HomePage() {
                           <td style={{ border: '1px solid #e2e8f0', padding: '7px' }}>{row.itemType}</td>
                           <td style={{ border: '1px solid #e2e8f0', padding: '7px', fontWeight: '600' }}>{row.itemName}</td>
                           <td style={{ border: '1px solid #e2e8f0', padding: '7px', textAlign: 'center', fontWeight: 'bold', color: '#065f46' }}>{row.quantity}</td>
+                          <td style={{ border: '1px solid #e2e8f0', padding: '7px', textAlign: 'center' }}>
+                            {row.imageUrl
+                              ? <img src={row.imageUrl} alt="" style={{ maxHeight: '60px', objectFit: 'contain', display: 'inline-block' }} />
+                              : <span style={{ color: '#cbd5e1' }}>—</span>}
+                          </td>
                           <td style={{ border: '1px solid #e2e8f0', padding: '7px', color: '#64748b' }}>{row.notes || '—'}</td>
                         </tr>
                       ))}
@@ -733,7 +831,7 @@ export default function HomePage() {
                 <div className="mb-5">
                   <div className="rounded-t-lg px-4 py-2" style={{ background: '#dc2626' }}>
                     <h2 style={{ color: 'white', fontWeight: 'bold', fontSize: '12pt', margin: 0 }}>
-                      کەل و پەلی کەمبوو (-) — Deficit Items
+                      کەل و پەلی کەم (-)
                     </h2>
                   </div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11pt' }}>
@@ -818,6 +916,11 @@ export default function HomePage() {
         {/* ════════════════════════════════════════════════════════════════ */}
         {activePage === 'myForms' && (
           <div className="rounded-[24px] border border-slate-200 bg-white p-6 shadow-sm">
+            {detailError && (
+              <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                {detailError}
+              </div>
+            )}
             <div className="mb-5 flex items-center justify-between">
               <h2 className="text-lg font-bold text-slate-900">
                 {isSuperAdmin ? 'هەموو فۆرمەکان' : 'فۆرمەکانم'}
@@ -882,6 +985,18 @@ export default function HomePage() {
                             </svg>
                             چاپ
                           </button>
+                          {/* 🗑 Delete */}
+                          <button
+                            onClick={() => deleteForm(form.id)}
+                            disabled={detailLoading}
+                            title="سڕینەوەی فۆرم"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50 transition"
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                            سڕینەوە
+                          </button>
                         </div>
                       </td>
                       <td className="border border-slate-200 px-4 py-3 font-medium text-slate-900">{form.organization}</td>
@@ -903,7 +1018,16 @@ export default function HomePage() {
         {/* ════════════════════════════════════════════════════════════════ */}
         {/* VIEW: Form Detail — A4 official document                         */}
         {/* ════════════════════════════════════════════════════════════════ */}
-        {activePage === 'formDetail' && selectedForm && (
+        {activePage === 'formDetail' && detailLoading && (
+          <div className="flex items-center justify-center py-24 text-slate-500 text-sm gap-3">
+            <svg className="animate-spin h-5 w-5 text-sky-600" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+            </svg>
+            فۆرم بارکراوە...
+          </div>
+        )}
+        {activePage === 'formDetail' && !detailLoading && selectedForm && (
           <div>
             {/* Action bar (hidden on print) */}
             <div className="no-print mb-4 flex flex-wrap items-center gap-3">
@@ -911,10 +1035,25 @@ export default function HomePage() {
                 className="rounded-2xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50">
                 ← گەڕانەوە
               </button>
-              <button onClick={() => window.print()}
-                className="rounded-2xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-700">
-                🖨 چاپکردن (A4)
+              <button
+                onClick={() => window.print()}
+                className="print:hidden inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-slate-700 transition">
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                </svg>
+                چاپکردن (A4)
               </button>
+              <button
+                onClick={() => window.print()}
+                className="print:hidden inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 transition">
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                دابەزاندنی PDF
+              </button>
+              <span className="rounded-full border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">
+                فۆرمی پاشەکەوتکراو — Read-Only
+              </span>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-slate-500">ئاست:</span>
                 <StatusBadge status={selectedForm.status} />
@@ -932,18 +1071,36 @@ export default function HomePage() {
             </div>
 
             {/* ── A4 Document ── */}
-            <div className="print-area a4-container mx-auto bg-white shadow-paper border border-slate-200 p-[15mm]">
+            {!detailLoading && selectedForm.plusItems.length === 0 && selectedForm.minusItems.length === 0 && (
+              <div className="no-print mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                ئاگاداری: هیچ کەل و پەلێک بارنەکراوە. ئەگەر فۆرمەکە پڕکراوە، تکایە مسۆگەری کە سیاسەتەکانی خوێندنەوەی Supabase دروست دانراون.
+              </div>
+            )}
 
-              {/* Document header */}
-              <div className="border-b-2 border-black pb-4 mb-5 text-center">
-                <h1 className="text-[22pt] font-bold text-black leading-tight">فۆرمی جیاوازییەکانی جەرد</h1>
+            <div ref={a4Ref} className="print-area a4-container mx-auto bg-white shadow-paper border border-slate-200 p-[15mm]">
+
+              {/* Document header — title and organisation only */}
+              <div className="border-b-2 border-black pb-4 mb-3 text-center">
+                <h1 className="text-[22pt] font-bold text-black leading-tight">کەل و پەلی زیاد و کەمی جەرد</h1>
                 <p className="text-base font-semibold text-slate-800 mt-2">{selectedForm.organization}</p>
+              </div>
+
+              {/* Archival metadata — date and submitter; frozen at submission time */}
+              <div className="mb-4 flex flex-wrap justify-between gap-2 border-b border-slate-200 pb-2 text-xs text-slate-500">
+                <span>
+                  <span className="font-semibold text-slate-700">بەرواری تۆمارکردن: </span>
+                  {formatDate(selectedForm.created_at)}
+                </span>
+                <span>
+                  <span className="font-semibold text-slate-700">پێشکەشکراوە لەلایەن: </span>
+                  {selectedForm.created_by_email ?? '—'}
+                </span>
               </div>
 
               {/* Plus items table */}
               <div className="mb-5">
                 <div className="rounded-t-xl bg-emerald-600 px-4 py-2.5">
-                  <h2 className="font-bold text-white text-sm">کەل و پەلی زیادە (+) — Surplus Items</h2>
+                  <h2 className="font-bold text-white text-sm">کەل و پەلی زیاد (+)</h2>
                 </div>
                 <table className="w-full border-separate border-spacing-0 text-right text-sm">
                   <thead>
@@ -989,7 +1146,7 @@ export default function HomePage() {
               {/* Minus items table */}
               <div className="mb-5">
                 <div className="rounded-t-xl bg-rose-600 px-4 py-2.5">
-                  <h2 className="font-bold text-white text-sm">کەل و پەلی کەمبوو (-) — Deficit Items</h2>
+                  <h2 className="font-bold text-white text-sm">کەل و پەلی کەم (-)</h2>
                 </div>
                 <table className="w-full border-separate border-spacing-0 text-right text-sm">
                   <thead>
